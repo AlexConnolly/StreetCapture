@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS embeddings (
     model_version TEXT,
     created_at    REAL
 );
+CREATE TABLE IF NOT EXISTS labels (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id INTEGER REFERENCES artifacts(id),
+    type        TEXT,          -- object | subtype | function | company | energy
+    value       TEXT
+);
 CREATE TABLE IF NOT EXISTS events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      INTEGER,
@@ -95,7 +101,10 @@ CREATE TABLE IF NOT EXISTS events (
     time            REAL
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at);
+CREATE INDEX IF NOT EXISTS idx_artifacts_start ON artifacts(start_time);
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(time);
+CREATE INDEX IF NOT EXISTS idx_labels_artifact ON labels(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_labels_value ON labels(type, value);
 """
 
 
@@ -150,6 +159,9 @@ class Database:
         row.setdefault("time", time.time())
         return self._insert("events", row)
 
+    def insert_label(self, artifact_id: int, ltype: str, value: str) -> int:
+        return self._insert("labels", {"artifact_id": artifact_id, "type": ltype, "value": value})
+
     def _insert(self, table: str, row: dict) -> int:
         cols = ", ".join(row)
         ph = ", ".join("?" for _ in row)
@@ -190,6 +202,10 @@ class Database:
                     "SELECT model_version, dim FROM embeddings WHERE artifact_id=?", (r["id"],)
                 ).fetchone()
                 d["embedding"] = dict(emb) if emb else None
+                labs = self._conn.execute(
+                    "SELECT type, value FROM labels WHERE artifact_id=? ORDER BY id", (r["id"],)
+                ).fetchall()
+                d["labels"] = [dict(l) for l in labs]
                 out.append(d)
             self._conn.row_factory = None
             return out

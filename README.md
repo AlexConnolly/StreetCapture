@@ -1,69 +1,68 @@
-# StreetCapture — v0.2 (Identity & Artifact Foundation)
+# StreetCapture — v1.0
 
-A local **dual-speed perception engine** for an IP camera.
+Turn a live RTSP camera into a **searchable, structured memory of the physical world at one location** — not surveillance, not just detection: a visual memory + query system.
 
-- **Fast loop (~5 FPS)** — what is happening *now*: RTSP → YOLOv8-nano detection → ByteTrack IDs → live overlay.
-- **Slow loop (~1–2 FPS)** — what it *means over time*: it accumulates candidate crops per track, and when a track **completes** it decides whether the track is *meaningful*. Meaningful tracks become **Artifacts** — representative images + quality scores + a CLIP embedding, persisted to a local SQLite "memory" database.
+- **Live perception (~5 FPS)** — RTSP → YOLOv8-nano → ByteTrack → live overlay.
+- **Artifact pipeline (async, ~1–2 FPS)** — completed tracks become **Artifacts**: keyframes, quality stats, multi-label taxonomy, a CLIP embedding (SQLite + files + FAISS index).
+- **Event + query engine** — artifacts become structured events, answerable in plain-ish English.
 
 ```
-RTSP ─▶ FrameGrabber ─▶ [LIVE: YOLO+ByteTrack → overlay]        (main thread, ~5 FPS)
-                    └──▶ shared state ──▶ [ARTIFACT loop]        (thread, ~1–2 FPS)
-                                             ├─ representative images
-                                             ├─ quality scores
-                                             ├─ OpenCLIP embedding
-                                             └─ SQLite artifact DB
+RTSP ─▶ FrameGrabber ─▶ [LIVE: YOLO+ByteTrack → overlay]          (main thread, ~5 FPS)
+                    └──▶ shared state ──▶ [ARTIFACT loop]          (thread, ~1–2 FPS)
+                                             ├─ keyframes + quality scores
+                                             ├─ multi-label taxonomy
+                                             ├─ OpenCLIP embedding ─▶ FAISS index
+                                             └─ SQLite  ─▶  EVENT + QUERY ENGINE  ─▶  answers
 ```
 
-Detection runs **once** per frame and is shared with the artifact loop — one YOLO pass, easy on a 6–8 GB GPU. Embeddings run only when a track *ends*, off the live path.
+Detection runs **once** per frame, shared to the artifact loop. Embeddings run only when a track ends — the live loop is never blocked.
 
-## Track ID vs Entity ID
+## Track vs Artifact vs Entity
 
-A **Track ID** is one continuous observation (ByteTrack). It is never reused, and ByteTrack IDs restart each run, so the permanent identifier is the DB primary key. An **Entity ID** (persistent identity across many tracks — "probably the same van") is **not implemented yet** — the schema reserves a nullable `entity_id` for v0.3+. Keeping these separate now is the whole point of v0.2.
+- **Track** — one continuous observation (ByteTrack). Ephemeral, never reused; ByteTrack IDs restart each run so the permanent id is the DB primary key.
+- **Artifact** — a *meaningful* completed track, promoted through quality gating and stored as persistent memory.
+- **Entity** — a persistent identity across many tracks ("the DPD van"). **Not implemented in v1**; the schema reserves a nullable `entity_id`. Emergent identity/clustering is v2.
 
-## Install
+## Install & run
 
 ```bash
 python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements.txt
-```
 
-`yolov8n.pt` and the OpenCLIP weights download automatically on first use. CUDA torch is used if present (CPU works, slower).
-
-## Run
-
-```bash
 python -m streetcapture                                             # webcam (default)
 python -m streetcapture --source "rtsp://user:pass@192.168.1.50:554/stream1"   # Tapo
-python -m streetcapture --source clip.mp4 --headless                # data only, no windows
+python -m streetcapture --source clip.mp4 --headless               # data only
 ```
 
-Windows: **LIVE VIEW** (boxes, class, track ID, plus per-track age / size / *ARTIFACT PENDING*) and **ARTIFACT VIEW** (active tracks, artifacts today, recent events). Press **`q`** to quit.
+Model + CLIP weights download on first use; CUDA torch is used if present. Press **`q`** to quit.
 
-Browse what it remembered:
+## Ask it questions
 
 ```bash
-python -m streetcapture.viewer      # http://127.0.0.1:8000  — scrollable artifact gallery
-python scripts/report.py            # text summary of the database
+python -m streetcapture.query "how many vehicles passed yesterday?"
+python -m streetcapture.query "quietest time for foot traffic?"
+python -m streetcapture.query                       # interactive
+python -m streetcapture.viewer                      # http://127.0.0.1:8000 — gallery + query box
+python scripts/report.py                            # text summary
 ```
 
-Flags: `--source --model --device {"",cpu,0} --conf --live-fps --artifact-fps --no-embed --no-live --no-dashboard --headless`. Every setting also has a `STREETCAPTURE_*` env var (thresholds, rep-image counts, embedding model — see `streetcapture/config.py`).
+The query engine parses a **time range** (today / yesterday / last <weekday> / last week / "between 8–10am"), a **label filter** (people / vehicles / bikes …), and an **intent** (count / when / quietest / busiest / how-often / list). It is deliberately rule-based — the **LLM-over-DB** layer is a v2 item. Queries that reference emergent labels ("DPD", "delivery", "bin lorry") are accepted but return a note that identity clustering lands in v2, plus the closest physical match.
 
 ## Data / memory layer
 
 ```
 artifacts/
-  artifact.db        SQLite: sessions, tracks, artifacts, artifact_images, embeddings, events
-  images/            representative crops, NNNNNN_<rank>.jpg
+  artifact.db     SQLite: sessions, tracks, artifacts, artifact_images, embeddings, labels, events
+  images/         representative keyframes, NNNNNN_<rank>.jpg
+  faiss.index     FAISS inner-product index of artifact embeddings (built now; similarity search is v2)
 ```
 
-Each **Artifact** stores: class, start/end/duration, avg confidence, sharpness, visibility, motion distance, track length, motion path, 3–10 representative images, a 512-d OpenCLIP embedding (model-versioned), and a reserved `entity_id`.
+**Multi-label taxonomy** (per artifact): `object` / `subtype` / `function` are populated deterministically from the class now; `company` / `energy` / other attributes are reserved for v2 (emergent via clustering).
 
-**Events:** `track_started`, `track_ended`, `artifact_created`, `artifact_rejected` (with reason) — full traceability of every decision.
+**Events:** `track_started`, `track_ended`, `artifact_created`, `artifact_rejected` (+reason), plus derived `object_entered`, `object_left`, `object_stayed`, `vehicle_passed`.
 
 ## Scope
 
-**In v0.2:** Track→Artifact pipeline with quality gating, Track-ID/Entity-ID separation, representative-image selection, OpenCLIP embedding per artifact, SQLite memory DB, web artifact browser, quality scoring, richer events.
+**In v1.0:** live perception, Track→Artifact pipeline with quality gating, keyframes, multi-label taxonomy, OpenCLIP embeddings, SQLite memory DB, FAISS embedding index, structured event engine, rule-based query engine (CLI + web), artifact viewer.
 
-**Explicitly deferred (v0.3+):** similarity / nearest-neighbour search, clustering (HDBSCAN), entity matching, semantic labels (DPD van, bin lorry…), temporal prediction, natural-language search, multi-camera.
-
-> v0.1 → *a system that observes*. v0.2 → *a system that remembers*. Reliable memory first; similarity, clustering and semantics build on top of it.
+**Deferred to v2+:** embedding similarity search & auto-clustering (DPD / bin-lorry grouping), entity persistence, anomaly detection, the LLM natural-language query layer, multi-camera.

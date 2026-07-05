@@ -56,6 +56,13 @@ def main() -> None:
         for r in models:
             print(f"  {r['model_version']:<32} {r['c']:>4}")
 
+    labs = conn.execute(
+        "SELECT type, value, COUNT(*) c FROM labels GROUP BY type, value ORDER BY type, c DESC").fetchall()
+    if labs:
+        print("\nLabels:")
+        for r in labs:
+            print(f"  {r['type']:<9} {r['value']:<20} {r['c']:>4}")
+
     recent = conn.execute(
         "SELECT id, primary_class, duration, avg_confidence, sharpness "
         "FROM artifacts ORDER BY id DESC LIMIT 10").fetchall()

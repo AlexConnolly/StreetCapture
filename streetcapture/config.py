@@ -74,6 +74,10 @@ class Config:
         return self.artifacts_dir / "images"
 
     @property
+    def faiss_path(self) -> Path:
+        return self.artifacts_dir / "faiss.index"
+
+    @property
     def cv_source(self):
         """OpenCV wants an int for webcams, a string for URLs / files."""
         return int(self.source) if str(self.source).isdigit() else self.source

@@ -11,5 +11,5 @@ pandas>=2.0
 open_clip_torch>=2.20
 pillow>=10.0
 
-# Optional / future (v0.3+)
-# faiss-cpu   # similarity search / clustering
+# v1.0 — vector index for the artifact embeddings
+faiss-cpu>=1.8

@@ -21,6 +21,7 @@ from .db import Database
 from .detector import Detector
 from .embeddings import Embedder
 from .state import SharedState
+from .vectorstore import VectorStore
 
 
 def run(cfg: Config) -> None:
@@ -34,8 +35,9 @@ def run(cfg: Config) -> None:
     grabber = FrameGrabber(cfg.cv_source).start()
     detector = Detector(cfg)
     embedder = Embedder(cfg)
-    print(f"[streetcapture] embeddings: {embedder.model_version}")
-    artifact = ArtifactEngine(cfg, state, db, embedder, session_id).start()
+    vectorstore = VectorStore(cfg.faiss_path)
+    print(f"[streetcapture] embeddings: {embedder.model_version}  faiss: {vectorstore.available}")
+    artifact = ArtifactEngine(cfg, state, db, embedder, vectorstore, session_id).start()
 
     live_interval = 1.0 / max(cfg.live_fps, 0.1)
     fps_ema = None
@@ -70,6 +72,7 @@ def run(cfg: Config) -> None:
         print("\n[streetcapture] interrupted")
     finally:
         artifact.stop()
+        vectorstore.save()
         grabber.stop()
         db.close()
         cv2.destroyAllWindows()

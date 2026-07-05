@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import Config
 from .db import Database
+from .query import QueryEngine
 
 PAGE_CSS = """
 * { box-sizing: border-box; }
@@ -35,13 +36,20 @@ h1 { margin:0; font-size:18px; letter-spacing:.5px; color:#00c8ff; }
 .cls.person{color:#37d67a;} .cls.vehicle{color:#f0a028;} .cls.other{color:#ccc;}
 .meta { color:#9a9a9a; font-size:12px; margin-top:4px; line-height:1.5; }
 .tag { display:inline-block; padding:1px 6px; border-radius:6px; background:#242424; margin-right:4px; font-size:11px; }
+.lab { display:inline-block; padding:1px 6px; border-radius:6px; background:#1e2d33; color:#7fd0e8; margin:2px 4px 0 0; font-size:11px; }
 .emb { color:#00c8ff; } .noemb { color:#c85; }
 a { color:inherit; text-decoration:none; }
+form.q { margin-top:10px; display:flex; gap:8px; }
+form.q input[type=text] { flex:1; max-width:640px; padding:8px 10px; border-radius:8px; border:1px solid #333; background:#111; color:#eee; font-size:14px; }
+form.q button { padding:8px 16px; border-radius:8px; border:0; background:#00c8ff; color:#001; font-weight:600; cursor:pointer; }
+.answer { margin:14px 22px 0; padding:12px 16px; background:#12232a; border:1px solid #1e3a44; border-radius:10px; color:#cfeaf3; white-space:pre-wrap; font-size:14px; }
+.ex { color:#666; font-size:12px; margin-top:6px; }
 """
 
 
 class Handler(BaseHTTPRequestHandler):
     db: Database = None
+    db_path: str = ""
     images_root: str = ""
 
     def log_message(self, *a):  # quiet
@@ -50,7 +58,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            self._index()
+            q = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
+            self._index(q)
         elif parsed.path == "/img":
             self._image(urllib.parse.parse_qs(parsed.query).get("p", [""])[0])
         else:
@@ -70,9 +79,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _index(self):
+    def _index(self, q=""):
         arts = self.db.recent_artifacts(limit=300)
         counts = self.db.counts()
+
+        answer_html = ""
+        if q.strip():
+            eng = QueryEngine(self.db_path)
+            try:
+                ans = eng.answer(q)
+            finally:
+                eng.close()
+            answer_html = f'<div class="answer">{html.escape(ans)}</div>'
+
         cards = []
         for a in arts:
             imgs = "".join(
@@ -86,11 +105,16 @@ class Handler(BaseHTTPRequestHandler):
             emb = a["embedding"]
             emb_html = (f'<span class="emb">emb: {html.escape(emb["model_version"])} ({emb["dim"]}d)</span>'
                         if emb else '<span class="noemb">emb: none</span>')
+            labs = "".join(
+                f'<span class="lab">{html.escape(l["type"])}: {html.escape(l["value"])}</span>'
+                for l in a.get("labels", [])
+            )
             cards.append(f"""
             <div class="card">
               <div class="imgs">{imgs}</div>
               <div class="body">
                 <div class="cls {catcls}">{cls} <span style="color:#666;font-weight:400">· Artifact #{a['id']}</span></div>
+                <div>{labs}</div>
                 <div class="meta">
                   <span class="tag">track #{a['source_track_id']}</span>
                   <span class="tag">entity {a['entity_id'] if a['entity_id'] is not None else '—'}</span><br>
@@ -101,11 +125,19 @@ class Handler(BaseHTTPRequestHandler):
               </div>
             </div>""")
 
+        qval = html.escape(q)
         body = f"""<!doctype html><html><head><meta charset="utf-8">
         <title>StreetCapture — Artifacts</title><style>{PAGE_CSS}</style></head><body>
         <header><h1>StreetCapture — Artifact Viewer</h1>
         <div class="sub">{counts['artifacts']} artifacts · {counts['tracks']} tracks · {counts['embeddings']} embeddings · {counts['events']} events</div>
-        </header><div class="grid">{''.join(cards) or '<p style="color:#888">No artifacts yet. Run the live system to build some.</p>'}</div>
+        <form class="q" method="get" action="/">
+          <input type="text" name="q" value="{qval}" placeholder="Ask: how many vehicles passed yesterday?">
+          <button type="submit">Ask</button>
+        </form>
+        <div class="ex">try: “quietest time for foot traffic” · “how many vehicles today” · “show people this week”</div>
+        </header>
+        {answer_html}
+        <div class="grid">{''.join(cards) or '<p style="color:#888">No artifacts yet. Run the live system to build some.</p>'}</div>
         </body></html>"""
         data = body.encode("utf-8")
         self.send_response(200)
@@ -123,6 +155,7 @@ def main(argv=None):
 
     cfg = Config()
     Handler.db = Database(cfg.db_path)
+    Handler.db_path = str(cfg.db_path)
     Handler.images_root = os.path.abspath(str(cfg.images_dir))
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f"Artifact viewer: http://{a.host}:{a.port}  (db: {cfg.db_path})  Ctrl+C to stop")

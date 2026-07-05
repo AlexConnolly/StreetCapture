@@ -19,17 +19,8 @@ from collections import Counter, defaultdict, deque
 
 import cv2
 
-from . import quality
-
-VEHICLE_CLASSES = {"car", "truck", "bus", "motorbike", "motorcycle", "bicycle", "train"}
-
-
-def category(cls_name: str) -> str:
-    if cls_name == "person":
-        return "person"
-    if cls_name in VEHICLE_CLASSES:
-        return "vehicle"
-    return "other"
+from . import quality, taxonomy
+from .taxonomy import category
 
 
 class Sample:
@@ -78,11 +69,12 @@ class TrackAccumulator:
 
 
 class ArtifactEngine:
-    def __init__(self, cfg, state, db, embedder, session_id):
+    def __init__(self, cfg, state, db, embedder, vectorstore, session_id):
         self.cfg = cfg
         self.state = state
         self.db = db
         self.embedder = embedder
+        self.vectorstore = vectorstore
         self.session_id = session_id
         self.tracks: dict[int, TrackAccumulator] = {}
         self._lock = threading.Lock()
@@ -265,17 +257,40 @@ class ArtifactEngine:
                 "rank": rank,
             })
 
-        # Embedding from the single best representative.
+        # Multi-label taxonomy (object/subtype/function; company/energy are v2).
+        for lab in taxonomy.labels_for(cls):
+            self.db.insert_label(artifact_id, lab["type"], lab["value"])
+
+        # Embedding from the single best representative -> DB + FAISS index.
         if reps and self.cfg.embed_enabled:
             vec = self.embedder.embed(reps[0].crop)
             if vec:
                 self.db.insert_embedding(artifact_id, vec, self.embedder.model_version)
+                if self.vectorstore is not None:
+                    self.vectorstore.add(artifact_id, vec)
 
         self.artifact_counts[category(cls)] += 1
         self.daily_counts[category(cls)] += 1
         self._emit({"type": "artifact_created", "source_track_id": acc.track_id,
                     "artifact_id": artifact_id, "class": cls,
                     "duration": acc.duration, "time": now})
+        self._product_events(acc, artifact_id, cls, now)
+
+    def _product_events(self, acc, artifact_id, cls, now) -> None:
+        """Structured events derived from a completed artifact (section 7)."""
+        self._emit({"type": "object_entered", "artifact_id": artifact_id,
+                    "source_track_id": acc.track_id, "class": cls, "time": acc.first_seen})
+        self._emit({"type": "object_left", "artifact_id": artifact_id,
+                    "source_track_id": acc.track_id, "class": cls,
+                    "duration": acc.duration, "time": acc.last_seen})
+        if acc.duration >= self.cfg.stay_seconds:
+            self._emit({"type": "object_stayed", "artifact_id": artifact_id,
+                        "source_track_id": acc.track_id, "class": cls,
+                        "duration": acc.duration, "time": now})
+        if category(cls) == "vehicle":
+            self._emit({"type": "vehicle_passed", "artifact_id": artifact_id,
+                        "source_track_id": acc.track_id, "class": cls,
+                        "duration": acc.duration, "time": now})
 
     def _select_representatives(self, samples):
         """Pick rep_min..rep_max crops: prefer visible ones, spread over the
@@ -337,6 +352,10 @@ class ArtifactEngine:
             "reason": event.get("reason"),
             "time": event["time"],
         })
+        # object_entered/left duplicate the track lifecycle — keep them in the DB
+        # but out of the small on-screen feed to avoid flooding it.
+        if event["type"] in ("object_entered", "object_left"):
+            return
         ts = time.strftime("%H:%M:%S", time.localtime(event["time"]))
         et = event["type"]
         cls = event.get("class", "")
@@ -345,6 +364,10 @@ class ArtifactEngine:
             s = f"{ts}  ARTIFACT #{event['artifact_id']}  {cls} {event.get('duration', 0):.0f}s"
         elif et == "artifact_rejected":
             s = f"{ts}  rejected {cls} (#{tid}) — {event.get('reason', '')}"
+        elif et == "vehicle_passed":
+            s = f"{ts}  vehicle passed — {cls} (#{tid})"
+        elif et == "object_stayed":
+            s = f"{ts}  {cls} stayed {event.get('duration', 0):.0f}s (#{tid})"
         elif et == "track_started":
             s = f"{ts}  track #{tid} started ({cls})"
         elif et == "track_ended":
