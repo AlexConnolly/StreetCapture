@@ -52,6 +52,31 @@ python scripts/report.py                            # text summary
 
 The query engine parses a **time range** (today / yesterday / last <weekday> / last week / "between 8–10am"), a **label filter** (people / vehicles / bikes …), and an **intent** (count / when / quietest / busiest / how-often / list). It is deliberately rule-based — the **LLM-over-DB** layer is a v2 item. Queries that reference emergent labels ("DPD", "delivery", "bin lorry") are accepted but return a note that identity clustering lands in v2, plus the closest physical match.
 
+## Web UI (always-on, access from anywhere)
+
+A FastAPI backend runs the perception pipeline headless and serves a **mobile-first React + TypeScript + Tailwind** SPA plus a live MJPEG stream — all password-protected on one origin.
+
+```bash
+# one-time: build the web UI
+cd web && npm install && npm run build && cd ..
+
+# run the server (serves UI + API + live stream on :8000)
+set STREETCAPTURE_PASSWORD=your-secret          # protects the whole UI
+set STREETCAPTURE_SOURCE=rtsp://user:pass@192.168.68.109:554/stream1
+python -m streetcapture.server                  # http://localhost:8000
+```
+
+Or use the gitignored **`run_server.bat`** launcher (has the camera + password baked in). Then open `http://localhost:8000`, log in, and you get five tabs: **Live** (video + boxes + live stats), **Artifacts** (gallery + class filters + detail with all keyframes/labels/scores), **Events** (colour-coded feed), **Ask** (the query engine), **Stats** (KPI tiles + per-hour charts).
+
+**API** (JWT bearer auth; `<img>` endpoints also accept `?token=`): `POST /api/login` · `GET /api/stats` · `GET /api/stream` (MJPEG) · `GET /api/artifacts[?cls=]` · `GET /api/artifacts/{id}` · `GET /api/events` · `GET /api/query?q=` · `GET /api/hourly?cls=` · `GET /api/media/{id}/{rank}`.
+
+### Expose it to the internet
+
+- **Instant POC:** `ngrok http 8000` → public HTTPS URL you can open on your phone (free tier shows a one-time interstitial; click *Visit Site*). The URL changes each run.
+- **Production:** put **`deploy/nginx.conf`** in front for TLS + a stable domain (it proxies to uvicorn; MJPEG buffering is already disabled there — the one gotcha). Dev proxy for `npm run dev` is preconfigured in `web/vite.config.ts`.
+
+Frontend dev loop: `cd web && npm run dev` (proxies `/api` to `:8000`).
+
 ## Data / memory layer
 
 ```

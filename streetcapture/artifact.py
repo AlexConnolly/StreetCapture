@@ -363,7 +363,7 @@ class ArtifactEngine:
         if et == "artifact_created":
             s = f"{ts}  ARTIFACT #{event['artifact_id']}  {cls} {event.get('duration', 0):.0f}s"
         elif et == "artifact_rejected":
-            s = f"{ts}  rejected {cls} (#{tid}) — {event.get('reason', '')}"
+            s = f"{ts}  rejected {cls} (#{tid}) - {event.get('reason', '')}"
         elif et == "vehicle_passed":
             s = f"{ts}  vehicle passed — {cls} (#{tid})"
         elif et == "object_stayed":

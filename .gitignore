@@ -13,4 +13,10 @@ venv/
 
 # Local camera launcher — holds RTSP credentials, never commit
 /run_camera.bat
+/run_server.bat
 /camera.env
+
+# Web frontend build artifacts
+web/node_modules/
+web/dist/
+web/.vite/

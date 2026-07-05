@@ -184,11 +184,38 @@ class Database:
                 "events": one("SELECT COUNT(*) FROM events"),
             }
 
-    def recent_artifacts(self, limit: int = 200) -> list[dict]:
+    def recent_events(self, limit: int = 100) -> list[dict]:
         with self._lock:
             self._conn.row_factory = sqlite3.Row
             rows = self._conn.execute(
-                "SELECT * FROM artifacts ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT type, source_track_id, artifact_id, class, duration, reason, time "
+                "FROM events ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            self._conn.row_factory = None
+            return [dict(r) for r in rows]
+
+    def image_path(self, artifact_id: int, rank: int):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT path FROM artifact_images WHERE artifact_id=? AND rank=?",
+                (artifact_id, rank),
+            ).fetchone()
+            return row[0] if row else None
+
+    def get_artifact(self, artifact_id: int):
+        arts = self._recent_artifacts_where("WHERE id=?", (artifact_id,), 1)
+        return arts[0] if arts else None
+
+    def recent_artifacts(self, limit: int = 200, cls: str | None = None) -> list[dict]:
+        if cls:
+            return self._recent_artifacts_where("WHERE primary_class=?", (cls,), limit)
+        return self._recent_artifacts_where("", (), limit)
+
+    def _recent_artifacts_where(self, where: str, params: tuple, limit: int) -> list[dict]:
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            rows = self._conn.execute(
+                f"SELECT * FROM artifacts {where} ORDER BY id DESC LIMIT ?", (*params, limit)
             ).fetchall()
             out = []
             for r in rows:

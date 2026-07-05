@@ -69,6 +69,13 @@ class Config:
     show_live: bool = _env("STREETCAPTURE_SHOW_LIVE", "1") == "1"
     show_dashboard: bool = _env("STREETCAPTURE_SHOW_DASHBOARD", "1") == "1"
 
+    # --- Web server ------------------------------------------------------
+    web_host: str = _env("STREETCAPTURE_WEB_HOST", "0.0.0.0")
+    web_port: int = int(_env("STREETCAPTURE_WEB_PORT", "8000"))
+    web_password: str = _env("STREETCAPTURE_PASSWORD", "streetcapture")
+    web_secret: str = _env("STREETCAPTURE_SECRET", "")   # blank -> derived from password
+    jpeg_quality: int = int(_env("STREETCAPTURE_JPEG_QUALITY", "70"))
+
     @property
     def db_path(self) -> Path:
         return self.artifacts_dir / "artifact.db"
