@@ -10,3 +10,7 @@ venv/
 # Local memory layer (artifact db + images) and legacy v0.1 store
 /artifacts/
 /data/
+
+# Local camera launcher — holds RTSP credentials, never commit
+/run_camera.bat
+/camera.env
