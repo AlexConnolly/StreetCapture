@@ -80,10 +80,31 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="wrong password")
         return {"token": auth.issue_token(cfg)}
 
+    def _today_counts() -> dict:
+        """Per-category artifact counts for today, from the DB (survives restarts)."""
+        import sqlite3
+        from ..taxonomy import category
+        d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        lo, hi = d.timestamp(), (d + timedelta(days=1)).timestamp()
+        counts = {"person": 0, "vehicle": 0, "other": 0}
+        conn = sqlite3.connect(str(cfg.db_path))
+        for (cls,) in conn.execute(
+            "SELECT primary_class FROM artifacts WHERE start_time>=? AND start_time<?", (lo, hi)
+        ):
+            counts[category(cls)] = counts.get(category(cls), 0) + 1
+        conn.close()
+        return counts
+
     # -- live --------------------------------------------------------------
     @app.get("/api/stats", dependencies=[guard])
     def stats():
-        return app.state.service.live_stats()
+        s = app.state.service.live_stats()
+        # "today" figures come from the DB, not the in-memory session counter,
+        # so they reflect the full day and persist across restarts.
+        today = _today_counts()
+        s["daily"] = today
+        s["artifacts"] = today
+        return s
 
     @app.get("/api/stream", dependencies=[guard])
     def stream():
