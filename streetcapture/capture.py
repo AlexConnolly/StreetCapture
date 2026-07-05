@@ -8,6 +8,7 @@ requirement from the spec.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -32,12 +33,22 @@ class FrameGrabber:
         return self
 
     def _open(self):
-        cap = cv2.VideoCapture(self.source)
-        # Best-effort: keep the backend buffer tiny so reads return fresh frames.
-        try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
+        if isinstance(self.source, str) and self.source.lower().startswith("rtsp"):
+            # RTSP over TCP is far more reliable than the default UDP (no torn
+            # frames / packet loss); must be set before the capture is created.
+            os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+            cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+        else:
+            cap = cv2.VideoCapture(self.source)
+        # Best-effort: keep the backend buffer tiny so reads return fresh frames,
+        # and time out on connect rather than hanging if the camera is unreachable.
+        for prop, val in ((cv2.CAP_PROP_BUFFERSIZE, 1),
+                          (getattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC", -1), 10000)):
+            try:
+                if prop != -1:
+                    cap.set(prop, val)
+            except Exception:
+                pass
         return cap
 
     def _loop(self) -> None:
