@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -161,6 +161,59 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             buckets[datetime.fromtimestamp(ts).hour] += 1
         conn.close()
         return {"cls": cls, "range": rng, "buckets": buckets}
+
+    @app.get("/api/timeseries", dependencies=[guard])
+    def timeseries(bucket: int = 15, rng: str = "today"):
+        """People & vehicles over time in `bucket`-minute slots (default 15).
+
+        Category-aggregated (vehicle = car/truck/bus/… combined), with per-series
+        totals and the busiest slot — this is the "what have we actually seen"
+        view, sourced from the artifact DB.
+        """
+        import sqlite3
+        from ..taxonomy import category
+
+        now = datetime.now()
+        if rng == "24h":
+            base = now - timedelta(hours=24)
+            span_min = 24 * 60
+        else:  # today, midnight -> midnight
+            base = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            span_min = 24 * 60
+        bucket = max(1, min(bucket, 120))
+        lo = base.timestamp()
+        nb = span_min // bucket
+        hi = lo + nb * bucket * 60
+        person, vehicle = [0] * nb, [0] * nb
+
+        conn = sqlite3.connect(str(cfg.db_path))
+        for cls, ts in conn.execute(
+            "SELECT primary_class, start_time FROM artifacts WHERE start_time>=? AND start_time<?",
+            (lo, hi),
+        ):
+            idx = int((ts - lo) // (bucket * 60))
+            if 0 <= idx < nb:
+                c = category(cls)
+                if c == "person":
+                    person[idx] += 1
+                elif c == "vehicle":
+                    vehicle[idx] += 1
+        conn.close()
+
+        labels = [(base + timedelta(minutes=bucket * i)).strftime("%H:%M") for i in range(nb)]
+
+        def busiest(arr):
+            if not any(arr):
+                return None
+            i = max(range(nb), key=lambda k: arr[k])
+            return {"label": labels[i], "count": arr[i]}
+
+        return {
+            "bucket": bucket, "range": rng, "labels": labels,
+            "person": person, "vehicle": vehicle,
+            "totals": {"person": sum(person), "vehicle": sum(vehicle)},
+            "busiest": {"person": busiest(person), "vehicle": busiest(vehicle)},
+        }
 
     # -- SPA hosting (must be registered last) -----------------------------
     if (DIST / "assets").is_dir():

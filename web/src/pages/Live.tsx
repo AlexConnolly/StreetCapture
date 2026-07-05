@@ -11,9 +11,9 @@ export default function Live() {
   const { data } = usePoll(getStats, 2000, onAuth);
 
   const chips = [
-    { label: "FPS", value: data ? data.fps.toFixed(1) : "—" },
-    { label: "Active", value: data?.active ?? "—" },
-    { label: "Artifacts today", value: data ? sum(data.artifacts) : "—" },
+    { label: "Active now", value: data?.active ?? "—" },
+    { label: "People today", value: data ? data.daily.person ?? 0 : "—" },
+    { label: "Vehicles today", value: data ? data.daily.vehicle ?? 0 : "—" },
   ];
 
   return (
@@ -56,8 +56,4 @@ export default function Live() {
       </div>
     </Shell>
   );
-}
-
-function sum(o: Record<string, number>) {
-  return Object.values(o).reduce((a, b) => a + b, 0);
 }

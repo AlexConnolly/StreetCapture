@@ -101,6 +101,22 @@ export const ask = (q: string) =>
 export const getHourly = (cls: string) =>
   api<{ cls: string; range: string; buckets: number[] }>(`/api/hourly?cls=${cls}`);
 
+export interface Busiest {
+  label: string;
+  count: number;
+}
+export interface Timeseries {
+  bucket: number;
+  range: string;
+  labels: string[];
+  person: number[];
+  vehicle: number[];
+  totals: { person: number; vehicle: number };
+  busiest: { person: Busiest | null; vehicle: Busiest | null };
+}
+export const getTimeseries = (bucket = 15) =>
+  api<Timeseries>(`/api/timeseries?bucket=${bucket}`);
+
 // media & stream need the token in the URL (<img> can't send headers)
 export const withToken = (url: string) =>
   `${url}${url.includes("?") ? "&" : "?"}token=${getToken()}`;
