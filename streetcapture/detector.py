@@ -23,6 +23,7 @@ class Detector:
             persist=True,
             tracker="bytetrack.yaml",         # bundled with ultralytics
             conf=self.cfg.conf,
+            imgsz=self.cfg.imgsz,
             device=self.device,
             verbose=False,
         )

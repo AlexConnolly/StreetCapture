@@ -83,7 +83,8 @@ def _parse_args(argv=None) -> Config:
     cfg = Config()
     p = argparse.ArgumentParser(prog="streetcapture", description="Dual-speed perception engine (v0.2)")
     p.add_argument("--source", default=cfg.source, help="RTSP URL, webcam index, or video file")
-    p.add_argument("--model", default=cfg.model, help="YOLO model (nano recommended)")
+    p.add_argument("--model", default=cfg.model, help="YOLO model, e.g. yolov8n.pt / yolov8s.pt")
+    p.add_argument("--imgsz", type=int, default=cfg.imgsz, help="detector input size (higher = better small-object recall)")
     p.add_argument("--device", default=cfg.device, help='"", "cpu", or GPU index e.g. "0"')
     p.add_argument("--conf", type=float, default=cfg.conf)
     p.add_argument("--live-fps", type=float, default=cfg.live_fps)
@@ -96,6 +97,7 @@ def _parse_args(argv=None) -> Config:
 
     cfg.source = a.source
     cfg.model = a.model
+    cfg.imgsz = a.imgsz
     cfg.device = a.device
     cfg.conf = a.conf
     cfg.live_fps = a.live_fps

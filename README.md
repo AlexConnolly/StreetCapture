@@ -36,6 +36,10 @@ python -m streetcapture --source clip.mp4 --headless               # data only
 
 Model + CLIP weights download on first use; CUDA torch is used if present. Press **`q`** to quit.
 
+### Performance / tuning
+
+Defaults are **yolov8s @ imgsz 960, live loop capped at 15 FPS**. On an RTX 2070 that runs ~45 FPS of spare capacity, while a 1080p Tapo stream only delivers ~18.6 FPS — so the GPU is nowhere near the limit. Recall (catching small/distant objects) is driven mostly by **`--imgsz`**, not frame rate or confidence: raise it to 1280 for max recall, drop to 640 (or `--model yolov8n.pt`) for the lightest footprint. Frame rate mainly affects tracking continuity. The live loop never blocks — frames are dropped if it falls behind.
+
 ## Ask it questions
 
 ```bash

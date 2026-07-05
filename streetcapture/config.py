@@ -25,12 +25,16 @@ class Config:
     source: str = _env("STREETCAPTURE_SOURCE", "0")
 
     # --- Detection --------------------------------------------------------
-    model: str = _env("STREETCAPTURE_MODEL", "yolov8n.pt")   # nano only, per spec
+    # yolov8s at imgsz 960 runs ~45 FPS on an RTX 2070 — far above the ~18 FPS
+    # the camera delivers — while catching smaller/distant objects that the
+    # nano model at 640 misses. See the benchmark notes in the README.
+    model: str = _env("STREETCAPTURE_MODEL", "yolov8s.pt")
+    imgsz: int = int(_env("STREETCAPTURE_IMGSZ", "960"))     # detector input size
     device: str = _env("STREETCAPTURE_DEVICE", "")           # "" auto, "cpu", "0" (gpu)
     conf: float = float(_env("STREETCAPTURE_CONF", "0.35"))
 
     # --- FPS caps ---------------------------------------------------------
-    live_fps: float = float(_env("STREETCAPTURE_LIVE_FPS", "5"))
+    live_fps: float = float(_env("STREETCAPTURE_LIVE_FPS", "15"))
     artifact_fps: float = float(_env("STREETCAPTURE_ARTIFACT_FPS", "2"))
 
     # --- Track lifecycle --------------------------------------------------
