@@ -7,5 +7,6 @@ venv/
 # YOLO weights (auto-downloaded on first run)
 *.pt
 
-# Local data store
+# Local memory layer (artifact db + images) and legacy v0.1 store
+/artifacts/
 /data/

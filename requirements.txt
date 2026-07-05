@@ -7,6 +7,9 @@ lap>=0.5.12
 scipy>=1.10
 pandas>=2.0
 
-# Optional / future (v0.2+)
-# faiss-cpu
-# open_clip_torch
+# v0.2 — embeddings (artifact memory)
+open_clip_torch>=2.20
+pillow>=10.0
+
+# Optional / future (v0.3+)
+# faiss-cpu   # similarity search / clustering
