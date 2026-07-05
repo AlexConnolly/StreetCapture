@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# YOLO weights (auto-downloaded on first run)
+*.pt
+
+# Local data store
+/data/
