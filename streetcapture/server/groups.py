@@ -53,7 +53,7 @@ class GroupService:
         self.reid = reid     # person-ReID embedder (identity); None = CLIP fallback
         self.vs = vectorstore
         self._lock = threading.Lock()
-        self._labeled = []   # [(gid, name, notify, last_notified, np_centroid)]
+        self._labeled = []   # [(gid, name, notify, last_notified, np_centroid, match_threshold)]
         self._seeded = set() # gids taught by drawn regions (use precise threshold)
         self._group_allowed_classes = {} # gid -> set(allowed classes)
         self._ents = []      # [[eid, occ, np_centroid, space], ...]
@@ -288,11 +288,12 @@ class GroupService:
 
     def _refresh_labeled(self) -> None:
         rows = self.db.labeled_group_centroids()
-        self._labeled = [(g, n, notify, ln, _norm(c)) for (g, n, notify, ln, c) in rows]
+        self._labeled = [(g, n, notify, ln, _norm(c), mthr)
+                         for (g, n, notify, ln, c, mthr) in rows]
         self._seeded = self.db.seeded_group_ids()
         self._group_allowed_classes = {
             gid: self.db.group_allowed_classes(gid)
-            for (gid, _, _, _, _) in self._labeled
+            for (gid, _, _, _, _, _) in self._labeled
         }
 
     def _load_entities(self) -> None:
@@ -480,8 +481,10 @@ class GroupService:
         # Auto-confirm all current members so they serve as the basis for learning/auto-tagging
         member_ids = self.db.group_members(group_id)
         if member_ids:
-            # Call the service method instead of DB layer directly to trigger retraining & backfill
-            self.set_members_status(group_id, member_ids, "confirmed")
+            self.set_members_feedback(group_id, member_ids, "confirmed")
+            # Recompute the discriminative centroid from the confirmed members and
+            # backfill, so the newly-named group learns and starts auto-tagging.
+            self.train_and_backfill(group_id)
         else:
             self._refresh_labeled()
 
@@ -518,7 +521,14 @@ class GroupService:
             # 2. Add selected artifacts as confirmed members of the tag group
             self.set_members_feedback(group_id, artifact_ids, "confirmed")
 
-        # 3. Clean up source group (suggested cluster) if provided
+        # 3. Compute each tag group's centroid from its confirmed members and
+        #    backfill existing artifacts. Without this a freshly-created tag
+        #    group keeps a NULL centroid, so labeled_group_centroids() (and thus
+        #    _labeled / _auto_tag) skips it and NEW artifacts are never tagged.
+        for group_id in group_ids:
+            self.train_and_backfill(group_id)
+
+        # 4. Clean up source group (suggested cluster) if provided
         if source_group_id is not None and group_ids:
             with self.db._lock:
                 self.db._conn.execute(
@@ -667,9 +677,11 @@ class GroupService:
     def _backfill_group(self, group_id: int, threshold: float | None = None) -> int:
         """Tag existing artifacts that already match this group's prototype, so a
         freshly-taught label is useful immediately (not only for future frames)."""
-        cent = next((c for (g, _n, _no, _ln, c) in self._labeled if g == group_id), None)
-        if cent is None:
+        entry = next(((c, mthr) for (g, _n, _no, _ln, c, mthr) in self._labeled
+                      if g == group_id), None)
+        if entry is None:
             return 0
+        cent, mthr = entry
         ids, X, classes = self._matrix()
         if not ids:
             return 0
@@ -677,26 +689,31 @@ class GroupService:
         rejected = self.db.rejected_member_ids(group_id)
         existing = set(self.db.group_members(group_id))
         sims = X @ _norm(cent)
-        
+
         if threshold is not None:
             thr = threshold
+        elif mthr is not None:
+            thr = mthr          # calibrated LR decision boundary
         else:
             thr = (self.cfg.label_match_threshold if group_id in self._seeded
                    else self.cfg.group_match_threshold)
-        
+
         with self.db._lock:
             confirmed_count = self.db._conn.execute(
                 "SELECT COUNT(*) FROM group_members WHERE group_id=? AND status='confirmed'",
                 (group_id,)
             ).fetchone()[0]
 
+        # Auto-confirm only for cosine (mean-centroid) groups; the +0.08/0.85
+        # margin is meaningless against a calibrated LR score, so those add as
+        # unconfirmed 'auto' for the user to curate.
         auto_label_thr = max(0.85, thr + 0.08)
         to_add = []
         for i in range(len(ids)):
             if allowed and classes[i] not in allowed:
                 continue
             if sims[i] >= thr and ids[i] not in rejected and ids[i] not in existing:
-                if confirmed_count >= 10 and sims[i] >= auto_label_thr:
+                if mthr is None and confirmed_count >= 10 and sims[i] >= auto_label_thr:
                     to_add.append((ids[i], float(sims[i]), "auto_confirm", "confirmed"))
                 else:
                     to_add.append((ids[i], float(sims[i]), "auto"))
@@ -735,14 +752,17 @@ class GroupService:
             return None
         v = _norm(vec)
         best_name, best_s = None, -1.0
-        for (gid, name, _no, _ln, c) in self._labeled:
+        for (gid, name, _no, _ln, c, mthr) in self._labeled:
             if cls is not None:
                 allowed = self._group_allowed_classes.get(gid, set())
                 if allowed and cls not in allowed:
                     continue
             s = float(v @ c)
-            thr = (self.cfg.label_match_threshold if gid in self._seeded
-                   else self.cfg.live_label_threshold)
+            if mthr is not None:
+                thr = mthr          # calibrated LR decision boundary
+            else:
+                thr = (self.cfg.label_match_threshold if gid in self._seeded
+                       else self.cfg.live_label_threshold)
             if s >= thr and s > best_s:
                 best_name, best_s = name, s
         if best_name is not None:
@@ -814,13 +834,16 @@ class GroupService:
                 self.db.set_artifact_entity(artifact_id, eid)
 
     def _auto_tag(self, artifact_id, v, cls) -> None:
-        for i, (gid, name, notify_on, last_notified, c) in enumerate(list(self._labeled)):
+        for i, (gid, name, notify_on, last_notified, c, mthr) in enumerate(list(self._labeled)):
             allowed = self._group_allowed_classes.get(gid, set())
             if allowed and cls not in allowed:
                 continue
             s = float(v @ c)
-            thr = (self.cfg.label_match_threshold if gid in self._seeded
-                   else self.cfg.group_match_threshold)
+            if mthr is not None:
+                thr = mthr          # calibrated LR decision boundary
+            else:
+                thr = (self.cfg.label_match_threshold if gid in self._seeded
+                       else self.cfg.group_match_threshold)
             if s < thr:
                 continue
             # don't re-add / re-notify something the user explicitly rejected.
@@ -833,15 +856,17 @@ class GroupService:
                     (gid,)
                 ).fetchone()[0]
 
-            auto_label_thr = max(0.85, thr + 0.08)
-            if confirmed_count >= 10 and s >= auto_label_thr:
+            # Auto-confirm only for mean-centroid (cosine) groups, where the
+            # +0.08/0.85 margin is meaningful. For calibrated LR groups the score
+            # scale differs, so add as unconfirmed 'auto' and let the user curate.
+            if mthr is None and confirmed_count >= 10 and s >= max(0.85, thr + 0.08):
                 self.db.add_member(gid, artifact_id, s, "auto_confirm", "confirmed")
             else:
                 self.db.add_member(gid, artifact_id, s, "auto")
             if notify_on and (time.time() - last_notified) >= self.cfg.notify_cooldown_s:
                 self._notify(gid, name, artifact_id, cls, s)
                 self.db.touch_group_notified(gid)
-                self._labeled[i] = (gid, name, notify_on, time.time(), c)
+                self._labeled[i] = (gid, name, notify_on, time.time(), c, mthr)
 
     # -- feedback loop (curate a group -> improves its judgement) ----------
     def set_member_feedback(self, group_id: int, artifact_id: int, status: str) -> None:
@@ -913,31 +938,51 @@ class GroupService:
         if bg_vecs:
             all_neg_vecs.extend(bg_vecs)
 
+        # match_threshold: the cosine cut a matcher must clear against this
+        # centroid. None => fall back to the global cosine defaults (correct for a
+        # mean centroid). A discriminative LR centroid is a hyperplane NORMAL, not
+        # a class mean — dot products against it live on a totally different (much
+        # smaller) scale than the 0.72/0.78 cosine defaults, so it needs its own
+        # calibrated cut or nothing ever matches it.
+        match_threshold = None
+
         if all_neg_vecs and (len(pos_vecs) >= 5 or len(neg_vecs) > 0):
             # Train a discriminative Logistic Regression classifier
             # y=1 for positive group members, y=0 for background/rejected negatives
             X_pos = np.stack([_norm(x) for x in pos_vecs])
             X_neg = np.stack([_norm(x) for x in all_neg_vecs])
-            
+
             X_train = np.vstack([X_pos, X_neg])
             y_train = np.array([1] * len(X_pos) + [0] * len(X_neg))
-            
+
             from sklearn.linear_model import LogisticRegression
             # Train model with balanced weights to handle class imbalance
             clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=100, solver="liblinear")
             clf.fit(X_train, y_train)
-            
+
             w = clf.coef_[0]
+            b = float(clf.intercept_[0])
             # Ensure the weight vector aligns with the positive centroid
             if w @ pos_mean < 0:
                 w = -w
-            centroid = _norm(w)
+                b = -b
+            wn = float(np.linalg.norm(w))
+            if wn:
+                centroid = w / wn
+                # LR predicts positive when  w·x + b >= 0  <=>  centroid·x >= -b/wn.
+                # Store that decision boundary as the group's match cut so the
+                # matchers score in the same space the centroid lives in.
+                match_threshold = -b / wn
+            else:
+                centroid = _norm(w)
         else:
             centroid = _norm(pos_mean)
 
-        self.db.update_group(group_id, centroid=centroid.tolist(), size=len(pos_vecs))
+        self.db.update_group(group_id, centroid=centroid.tolist(), size=len(pos_vecs),
+                             match_threshold=match_threshold)
         self._refresh_labeled()
-        return {"members": len(pos_vecs), "basis": basis, "has_negatives": len(neg_vecs) > 0}
+        return {"members": len(pos_vecs), "basis": basis,
+                "has_negatives": len(neg_vecs) > 0, "match_threshold": match_threshold}
 
     def _notify(self, group_id, name, artifact_id, cls, score) -> None:
         click = f"{self._web_base}/artifacts/{artifact_id}" if self._web_base else None

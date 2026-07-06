@@ -212,6 +212,8 @@ class Database:
             self._conn.execute("ALTER TABLE groups ADD COLUMN tag_key TEXT")
         if "tag_value" not in gcols:
             self._conn.execute("ALTER TABLE groups ADD COLUMN tag_value TEXT")
+        if "match_threshold" not in gcols:
+            self._conn.execute("ALTER TABLE groups ADD COLUMN match_threshold REAL")
         ecols = {r[1] for r in self._conn.execute("PRAGMA table_info(entities)")}
         if "space" not in ecols:
             self._conn.execute("ALTER TABLE entities ADD COLUMN space TEXT DEFAULT 'clip'")
@@ -405,12 +407,14 @@ class Database:
             self._conn.commit()
 
     def labeled_group_centroids(self) -> list[tuple]:
-        """[(group_id, name, notify, last_notified, [centroid...]), ...] for labeled groups."""
+        """[(group_id, name, notify, last_notified, [centroid...], match_threshold), ...]
+        for labeled groups. match_threshold is NULL for mean centroids (callers fall
+        back to the global cosine defaults) and a calibrated cut for LR centroids."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, name, notify, last_notified, centroid FROM groups "
+                "SELECT id, name, notify, last_notified, centroid, match_threshold FROM groups "
                 "WHERE kind='labeled' AND centroid IS NOT NULL").fetchall()
-        return [(r[0], r[1], r[2], r[3], unpack_vector(r[4])) for r in rows]
+        return [(r[0], r[1], r[2], r[3], unpack_vector(r[4]), r[5]) for r in rows]
 
     def group_member_vectors(self, group_id: int, status: str | None = None,
                              exclude_rejected: bool = False) -> list:
