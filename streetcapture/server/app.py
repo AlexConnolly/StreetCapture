@@ -123,6 +123,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "sharpness": a["sharpness"],
             "visibility": a["visibility"],
             "motion": a["motion_distance"],
+            "direction": a.get("direction"),
+            "dir_x": a.get("dir_x"),
+            "dir_y": a.get("dir_y"),
             "frames": a["track_length"],
             "labels": a.get("labels", []),
             "embedding": a.get("embedding"),
@@ -578,7 +581,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="bad status")
         gs = app.state.service.groups
         gs.set_members_feedback(group_id, body.artifact_ids, body.status)
-        background_tasks.add_task(gs.train_and_backfill, group_id)
+        # A rejection is loud: relearn and sweep out other now-failing auto-tags.
+        task = gs.reclassify_group if body.status == "rejected" else gs.train_and_backfill
+        background_tasks.add_task(task, group_id)
         return {"ok": True}
 
     @app.post("/api/groups/{group_id}/members/{artifact_id}", dependencies=[guard])
@@ -587,7 +592,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="bad status")
         gs = app.state.service.groups
         gs.set_member_feedback(group_id, artifact_id, body.status)
-        background_tasks.add_task(gs.train_and_backfill, group_id)
+        task = gs.reclassify_group if body.status == "rejected" else gs.train_and_backfill
+        background_tasks.add_task(task, group_id)
         return {"ok": True}
 
     @app.post("/api/groups/{group_id}/auto-classify-remaining", dependencies=[guard])

@@ -111,7 +111,29 @@ def parse_filter(q: str):
     return frag, params, " ".join(desc) or "objects", note
 
 
+_DIR_CUES = ("moving", "move", "going", "goes", "went", "heading", "headed",
+             "travel", "toward", "towards", "direction", "which way")
+_DIR_WORDS = [("leftward", "%left%", "moving left"), ("rightward", "%right%", "moving right"),
+              ("upward", "%up%", "moving up"), ("downward", "%down%", "moving down"),
+              ("left", "%left%", "moving left"), ("right", "%right%", "moving right"),
+              ("up", "%up%", "moving up"), ("down", "%down%", "moving down")]
+
+
+def parse_direction(q: str):
+    """(sql_fragment, params, description) to filter by travel direction, or
+    ('', [], None). Bare left/right/up/down only count with a motion cue present,
+    so 'right now' or 'all up to date' don't accidentally filter."""
+    cue = any(c in q for c in _DIR_CUES)
+    for word, pat, desc in _DIR_WORDS:
+        if re.search(rf"\b{word}\b", q) and (cue or word.endswith("ward")):
+            return " AND a.direction LIKE ?", [pat], desc
+    return "", [], None
+
+
 def detect_intent(q: str) -> str:
+    if "which way" in q or "which direction" in q or "what direction" in q or (
+            "where" in q and any(w in q for w in ("going", "heading", "headed", "head", "went"))):
+        return "direction"
     if any(w in q for w in ("quietest", "least busy", "quiet")):
         return "quietest"
     if any(w in q for w in ("busiest", "peak", "most busy")):
@@ -132,9 +154,9 @@ class QueryEngine:
         self.conn = sqlite3.connect(str(db_path))
         self.conn.row_factory = sqlite3.Row
 
-    def _rows(self, frag, lo, hi):
+    def _rows(self, frag, lo, hi, params=None):
         where = "1=1" + frag
-        params = []
+        params = list(params) if params else []
         if lo is not None:
             where += " AND a.start_time >= ? AND a.start_time < ?"; params += [lo, hi]
         return self.conn.execute(
@@ -147,11 +169,16 @@ class QueryEngine:
             return "Ask me something like: 'how many vehicles passed yesterday?'"
         now = time.time()
         lo, hi, tlabel = parse_time_range(q, now)
-        frag, _, desc, note = parse_filter(q)
+        frag, params, desc, note = parse_filter(q)
+        dfrag, dparams, ddesc = parse_direction(q)
         intent = detect_intent(q)
-        rows = self._rows(frag, lo, hi)
+        rows = self._rows(frag + dfrag, lo, hi, params + dparams)
+        if ddesc and intent != "direction":
+            desc = f"{desc} {ddesc}"
 
-        if intent in ("quietest", "busiest"):
+        if intent == "direction":
+            ans = self._direction(rows, desc, tlabel)
+        elif intent in ("quietest", "busiest"):
             ans = self._density(rows, desc, tlabel, intent)
         elif intent == "when":
             ans = self._when(rows, desc, tlabel)
@@ -162,6 +189,18 @@ class QueryEngine:
         else:
             ans = f"{len(rows)} {desc} recorded ({tlabel})."
         return ans + (f"\n  note: {note}" if note else "")
+
+    def _direction(self, rows, desc, tlabel):
+        from collections import Counter
+        c = Counter(r["direction"] for r in rows
+                    if r["direction"] and r["direction"] != "stationary")
+        if not c:
+            return f"No travel direction recorded for {desc} ({tlabel})."
+        total = sum(c.values())
+        top, topn = c.most_common(1)[0]
+        breakdown = ", ".join(f"{n} {d}" for d, n in c.most_common())
+        return (f"{desc.capitalize()} ({tlabel}): mostly heading {top} "
+                f"({topn}/{total}). Breakdown: {breakdown}.")
 
     def _density(self, rows, desc, tlabel, which):
         if not rows:

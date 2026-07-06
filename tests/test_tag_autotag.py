@@ -229,3 +229,26 @@ def test_auto_classify_pending(service):
     human = db.group_member_vectors(gid, status="confirmed", exclude_auto_confirm=True)
     assert len(human) == len(males)
     assert db.human_confirmed_count(gid) == len(males)
+
+
+def test_reject_sweep_untags_machine_lookalikes(service):
+    """The reject-sweep re-scores MACHINE-classified members and untags ones that
+    no longer clear the threshold — never touching human confirmations."""
+    gs, db = service
+    males = [_add_artifact(db, "person", _vec(1.0, 0.0)),
+             _add_artifact(db, "person", _vec(0.98, 0.10)),
+             _add_artifact(db, "person", _vec(0.98, -0.10))]
+    gs.tag_artifacts(males, [{"key": "gender", "value": "male"}])
+    gid = _tag_group_id(db, "gender", "male")[0]
+
+    good = _add_artifact(db, "person", _vec(0.95, 0.05))   # on-model
+    bad = _add_artifact(db, "person", _vec(0.0, 1.0))       # off-model (a woman)
+    db.add_member(gid, good, 0.9, "auto_confirm", "confirmed")
+    db.add_member(gid, bad, 0.9, "auto_confirm", "confirmed")
+    gs._refresh_labeled()
+
+    gs.reclassify_group(gid, retrain=False)
+
+    assert bad not in db.group_members(gid), "off-model auto-tag was not swept"
+    assert good in db.group_members(gid), "on-model auto-tag wrongly swept"
+    assert set(males) <= set(db.group_members(gid)), "human confirmations were touched"

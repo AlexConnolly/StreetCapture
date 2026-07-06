@@ -103,11 +103,17 @@ class GroupService:
         # Upgrade existing labeled groups to the discriminative centroid model
         try:
             labeled = [g for g in self.db.list_groups() if g["kind"] == "labeled" and g.get("tag_key") and g.get("tag_value")]
+            swept = 0
             for g in labeled:
                 self._recompute_centroid(g["id"])
+                # Sweep out anything the machine auto-tagged that no longer clears
+                # the (now margin-based) threshold — cleans up low-confidence
+                # mistakes (e.g. women previously tagged male) without manual work.
+                swept += self.reclassify_group(g["id"], retrain=False).get("removed", 0)
                 self._backfill_group(g["id"])
             if labeled:
-                print(f"[groups] startup: upgraded {len(labeled)} labeled groups to discriminative centroids")
+                print(f"[groups] startup: upgraded {len(labeled)} labeled groups "
+                      f"(reject-sweep untagged {swept} low-confidence auto-tags)")
         except Exception as e:
             print(f"[groups] startup group upgrade failed: {e}")
 
@@ -882,6 +888,20 @@ class GroupService:
         self._recompute_centroid(group_id)
         self._backfill_group(group_id)
 
+    def _group_scorer(self, group_id: int):
+        """(normalised centroid, match threshold) for a labeled group, or None."""
+        entry = next(((c, mthr) for (g, _n, _no, _ln, c, mthr) in self._labeled
+                      if g == group_id), None)
+        if entry is None:
+            return None
+        cent, mthr = entry
+        if mthr is not None:
+            thr = mthr
+        else:
+            thr = (self.cfg.label_match_threshold if group_id in self._seeded
+                   else self.cfg.group_match_threshold)
+        return _norm(cent), thr
+
     def auto_classify_pending(self, group_id: int) -> dict:
         """'I've done enough training — let the model decide the rest.' Re-scores
         every un-reviewed suggestion against the current centroid: matches (>=
@@ -890,17 +910,10 @@ class GroupService:
         (auto_confirm is excluded), so it just applies the model you already
         trained. Dropped ones aren't blocked — a later match can re-add them."""
         self._recompute_centroid(group_id)   # score against the latest model
-        entry = next(((c, mthr) for (g, _n, _no, _ln, c, mthr) in self._labeled
-                      if g == group_id), None)
-        if entry is None:
+        sc = self._group_scorer(group_id)
+        if sc is None:
             return {"error": "group has no centroid"}
-        cent, mthr = entry
-        cent = _norm(cent)
-        if mthr is not None:
-            thr = mthr
-        else:
-            thr = (self.cfg.label_match_threshold if group_id in self._seeded
-                   else self.cfg.group_match_threshold)
+        cent, thr = sc
 
         classified, dropped = [], []
         for aid in self.db.pending_member_ids(group_id):
@@ -913,6 +926,30 @@ class GroupService:
         self.db.mark_auto_classified(group_id, classified)
         self.db.remove_members(group_id, dropped)
         return {"classified": len(classified), "dropped": len(dropped)}
+
+    def reclassify_group(self, group_id: int, retrain: bool = True) -> dict:
+        """A rejection is BAD news: relearn, then sweep. Re-scores every member
+        the MACHINE auto-classified (source='auto_confirm') against the updated
+        model and untags the ones that no longer clear the threshold — so
+        rejecting one look-alike pulls its siblings out too. Your confirmations
+        and seeds are never touched. Returns how many were swept out."""
+        if retrain:
+            self._recompute_centroid(group_id)
+        sc = self._group_scorer(group_id)
+        if sc is None:
+            return {"removed": 0}
+        cent, thr = sc
+        to_remove = []
+        for aid in self.db.auto_classified_member_ids(group_id):
+            vec = self.db.embedding_for(aid)
+            s = float(_norm(vec) @ cent) if vec is not None else -1.0
+            if s < thr:
+                to_remove.append(aid)
+        self.db.remove_members(group_id, to_remove)
+        if to_remove:
+            print(f"[groups] reject-sweep: untagged {len(to_remove)} no-longer-matching "
+                  f"auto-classified members from group {group_id}")
+        return {"removed": len(to_remove)}
 
     def _recompute_centroid(self, group_id: int) -> dict:
         # Get positive vectors
@@ -982,10 +1019,19 @@ class GroupService:
             X_train = np.vstack([X_pos, X_neg])
             y_train = np.array([1] * len(X_pos) + [0] * len(X_neg))
 
+            # Explicit rejections are LOUD: weight each one reject_weight× a
+            # background negative so a single "no" actually rotates the boundary
+            # away from the mistaken feature, instead of being 1-of-200.
+            sample_weight = np.concatenate([
+                np.ones(len(X_pos)),
+                np.full(len(neg_vecs), self.cfg.reject_weight),   # rejected first
+                np.ones(len(bg_vecs)),                            # then background
+            ]) if all_neg_vecs else None
+
             from sklearn.linear_model import LogisticRegression
             # Train model with balanced weights to handle class imbalance
             clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=100, solver="liblinear")
-            clf.fit(X_train, y_train)
+            clf.fit(X_train, y_train, sample_weight=sample_weight)
 
             w = clf.coef_[0]
             b = float(clf.intercept_[0])
@@ -996,10 +1042,15 @@ class GroupService:
             wn = float(np.linalg.norm(w))
             if wn:
                 centroid = w / wn
-                # LR predicts positive when  w·x + b >= 0  <=>  centroid·x >= -b/wn.
-                # Store that decision boundary as the group's match cut so the
-                # matchers score in the same space the centroid lives in.
-                match_threshold = -b / wn
+                # The raw decision line is -b/wn, but a match sitting right on it is
+                # a coin-flip (that's how a woman scoring ~0 got tagged male, and how
+                # a weak-signal group tags everyone). Require instead that a match
+                # out-score the given percentile of the BACKGROUND negatives — this
+                # directly bounds the false-positive rate. (Thresholding on the
+                # positives fails when classes overlap: the cut falls below the line.)
+                neg_scores = X_neg @ centroid
+                margin_cut = float(np.percentile(neg_scores, self.cfg.classify_bg_percentile))
+                match_threshold = max(-b / wn, margin_cut)
             else:
                 centroid = _norm(w)
         else:

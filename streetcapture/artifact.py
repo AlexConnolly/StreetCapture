@@ -19,7 +19,7 @@ from collections import Counter, defaultdict, deque
 
 import cv2
 
-from . import quality, taxonomy
+from . import db, quality, taxonomy
 from .taxonomy import category
 
 
@@ -238,6 +238,7 @@ class ArtifactEngine:
             "track_length": acc.frames_seen,
             "bbox_json": json.dumps([round(v, 1) for v in rep_bbox]),
             "motion_path_json": json.dumps(acc.positions[-self.cfg.max_positions:]),
+            **dict(zip(("dir_x", "dir_y", "direction"), db.compute_direction(acc.positions))),
             "entity_id": None,  # reserved for v0.3+
             "created_at": now,
         })

@@ -22,11 +22,36 @@ in a separate process, so a single write lock here is sufficient.
 
 from __future__ import annotations
 
+import json
+import math
 import sqlite3
 import struct
 import threading
 import time
 from pathlib import Path
+
+# A track that drifts less than this many pixels start-to-end is "stationary"
+# (jitter, not travel) and gets no travel direction.
+DIRECTION_MIN_PIXELS = 15.0
+_DIR_LABELS = ["right", "down-right", "down", "down-left",
+               "left", "up-left", "up", "up-right"]
+
+
+def compute_direction(positions):
+    """Travel direction of a track from its [cx, cy] centroid path (screen pixels,
+    y increasing downward). Returns (dir_x, dir_y, label): a unit vector from the
+    first to the last sighting plus an 8-way screen label ('left', 'up-right', …),
+    or (0, 0, 'stationary') if it barely moved, or (None, None, None) if unknown."""
+    if not positions or len(positions) < 2:
+        return None, None, None
+    (x0, y0), (x1, y1) = positions[0], positions[-1]
+    dx, dy = x1 - x0, y1 - y0
+    mag = math.hypot(dx, dy)
+    if mag < DIRECTION_MIN_PIXELS:
+        return 0.0, 0.0, "stationary"
+    ang = math.degrees(math.atan2(dy, dx))          # 0=right, 90=down, 180=left, -90=up
+    idx = int(((ang + 22.5) % 360) // 45)
+    return round(dx / mag, 3), round(dy / mag, 3), _DIR_LABELS[idx]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -217,6 +242,26 @@ class Database:
         ecols = {r[1] for r in self._conn.execute("PRAGMA table_info(entities)")}
         if "space" not in ecols:
             self._conn.execute("ALTER TABLE entities ADD COLUMN space TEXT DEFAULT 'clip'")
+        # Travel direction (v2): where each artifact was heading across the frame.
+        acols = {r[1] for r in self._conn.execute("PRAGMA table_info(artifacts)")}
+        for col, typ in (("dir_x", "REAL"), ("dir_y", "REAL"), ("direction", "TEXT")):
+            if col not in acols:
+                self._conn.execute(f"ALTER TABLE artifacts ADD COLUMN {col} {typ}")
+        # Backfill direction for existing artifacts from their stored motion path.
+        rows = self._conn.execute(
+            "SELECT id, motion_path_json FROM artifacts "
+            "WHERE direction IS NULL AND motion_path_json IS NOT NULL").fetchall()
+        for aid, mp in rows:
+            try:
+                dx, dy, lab = compute_direction(json.loads(mp))
+            except Exception:
+                continue
+            if lab is not None:
+                self._conn.execute(
+                    "UPDATE artifacts SET dir_x=?, dir_y=?, direction=? WHERE id=?",
+                    (dx, dy, lab, aid))
+        if rows:
+            print(f"[db] backfilled travel direction for {len(rows)} existing artifacts")
 
     # -- sessions ----------------------------------------------------------
     def start_session(self, source: str, model: str) -> int:
@@ -468,6 +513,15 @@ class Database:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT artifact_id FROM group_members WHERE group_id=? AND status IS NULL",
+                (group_id,)).fetchall()
+        return [r[0] for r in rows]
+
+    def auto_classified_member_ids(self, group_id: int) -> list[int]:
+        """Members the MACHINE classified (source='auto_confirm'). These are the
+        only ones a reject-sweep may retract — never the user's confirmations."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT artifact_id FROM group_members WHERE group_id=? AND source='auto_confirm'",
                 (group_id,)).fetchall()
         return [r[0] for r in rows]
 

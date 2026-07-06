@@ -135,6 +135,17 @@ class Config:
     # (source='auto_confirm') do NOT feed centroid training, so the model stays
     # anchored to your hand-labelled examples.
     auto_classify_min_confirmed: int = int(_env("STREETCAPTURE_AUTOCLASSIFY_MIN", "10"))
+    # A match must out-score this percentile of the group's BACKGROUND negatives
+    # to be tagged — i.e. "score higher than 95% of known non-members". This
+    # directly bounds the false-positive rate (~5% at 95), which is what stops a
+    # weak-signal group tagging every passer-by. Raise toward 99 for fewer false
+    # tags (lower recall); lower it for more recall. (Thresholding on positives
+    # doesn't work when the classes overlap — the cut lands below the boundary.)
+    classify_bg_percentile: float = float(_env("STREETCAPTURE_CLASSIFY_BG_PCTL", "95"))
+    # An explicit user rejection counts this many times a background negative when
+    # retraining, so one "no" decisively moves the boundary instead of being
+    # drowned out by the ~200 auto-sampled background examples.
+    reject_weight: float = float(_env("STREETCAPTURE_REJECT_WEIGHT", "20"))
     # Stricter bar when retro-applying a freshly-taught region label to existing
     # artifacts — a single drawn crop is a weak prototype, so keep it precise
     # (common things like 'a person' look alike in CLIP and would otherwise flood).
