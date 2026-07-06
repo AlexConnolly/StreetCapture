@@ -501,10 +501,6 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "tag_value": g.get("tag_value"),
         } for g in rows]
 
-    @app.post("/api/groups/recluster", dependencies=[guard])
-    def recluster():
-        return app.state.service.groups.recluster()
-
     @app.post("/api/groups/from-text", dependencies=[guard])
     def group_from_text(body: TextGroupBody):
         r = app.state.service.groups.create_from_text(body.name, body.prompt)

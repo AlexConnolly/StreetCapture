@@ -140,6 +140,7 @@ export default function GroupDetail() {
 
   const [tagsList, setTagsList] = useState<Array<{ key: string; value: string }>>([]);
   const [zoomArtifactId, setZoomArtifactId] = useState<number | null>(null);
+  const [previewId, setPreviewId] = useState<number | null>(null);
   const [isTraining, setIsTraining] = useState(false);
   const [trainerTagKey, setTrainerTagKey] = useState("");
   const [trainerTagValue, setTrainerTagValue] = useState("");
@@ -559,12 +560,12 @@ export default function GroupDetail() {
               return (
                 <div key={a.id} className="flex flex-col gap-1">
                   {isLabeled ? (
-                    <Link to={`/artifacts/${a.id}`} className={`relative block overflow-hidden rounded-md ${ring}`}>
+                    <div onClick={() => setPreviewId(a.id)} className={`relative block overflow-hidden rounded-md cursor-pointer ${ring}`}>
                       <img src={withToken(`${a.images[0]?.url}?group_id=${id}`)} className="aspect-square w-full object-cover" />
                       {a.member_source === "auto" && (
                         <span className="absolute left-0.5 top-0.5 rounded bg-black/70 px-1 text-[8px] text-zinc-300">auto</span>
                       )}
-                    </Link>
+                    </div>
                   ) : (
                     <div onClick={() => toggleSelect(a.id)} className={`relative block overflow-hidden rounded-md cursor-pointer ${ring}`}>
                       <img src={withToken(`${a.images[0]?.url}?group_id=${id}`)} className="aspect-square w-full object-cover animate-in fade-in duration-200" />
@@ -698,6 +699,38 @@ export default function GroupDetail() {
           </div>
         </div>
       )}
+
+      {previewId !== null && (() => {
+        const a = members?.find((m) => m.id === previewId);
+        if (!a) return null;
+        const st = a.member_status;
+        return (
+          <div onClick={() => setPreviewId(null)} className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200">
+            <div onClick={(e) => e.stopPropagation()} className="flex max-h-[88vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-line bg-panel shadow-2xl animate-in zoom-in duration-200">
+              <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
+                <span className="text-sm font-medium text-zinc-200">Artifact #{a.id} · {a.class}</span>
+                <div className="flex items-center gap-3">
+                  <Link to={`/artifacts/${a.id}`} className="text-[11px] text-zinc-400 hover:text-accent">full page ↗</Link>
+                  <button onClick={() => setPreviewId(null)} className="text-sm text-zinc-400 hover:text-zinc-100" title="Close">✕</button>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 overflow-y-auto p-3">
+                {a.images.map((im) => (
+                  <img key={im.rank} src={withToken(`${im.url}?group_id=${id}`)} className="w-full rounded-md object-cover" />
+                ))}
+              </div>
+              {isLabeled && (
+                <div className="flex gap-2 border-t border-line p-3">
+                  <button onClick={() => { act(a.id, st === "confirmed" ? "removed" : "confirmed"); setPreviewId(null); }}
+                    className={`flex-1 rounded-lg py-2 text-sm font-medium active:scale-95 transition ${st === "confirmed" ? "bg-accent text-black" : "bg-panel2 text-zinc-200"}`}>✓ Confirm</button>
+                  <button onClick={() => { act(a.id, "rejected"); setPreviewId(null); }}
+                    className={`flex-1 rounded-lg py-2 text-sm font-medium active:scale-95 transition ${st === "rejected" ? "bg-red-500 text-black" : "bg-panel2 text-zinc-200"}`}>✕ Reject</button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {zoomArtifactId !== null && (
         <div onClick={() => setZoomArtifactId(null)} className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/95 p-4 cursor-pointer animate-in fade-in duration-200">

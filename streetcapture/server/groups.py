@@ -2,7 +2,6 @@
 
 Everything here consumes the artifact embeddings we already collect:
 
-* recluster()          - unsupervised clustering -> "suggested" groups to name
 * create_from_text()   - zero-shot: a text concept -> a labeled group
 * create_from_artifact - one example -> a labeled group (its neighbours)
 * search()             - type a concept, rank artifacts (CLIP text->image)
@@ -32,18 +31,6 @@ def _norm(v):
     return v / n if n else v
 
 
-# Concepts we try to match a cluster's centroid against (CLIP zero-shot) so an
-# "unnamed cluster" comes with a human hint of what it probably is.
-HINT_VOCAB = [
-    "a pedestrian walking", "a person standing", "a person with a dog",
-    "a cyclist on a bicycle", "a delivery driver", "a person in hi-vis",
-    "a runner jogging", "a child", "a group of people",
-    "a car", "a white van", "a delivery van", "a truck", "a bus",
-    "a motorcycle", "a bicycle", "a taxi", "an emergency vehicle",
-    "a dog", "a cat", "a bird", "a parked car", "a moving car",
-    "a package or parcel", "a pushchair or pram", "an umbrella",
-]
-
 
 class GroupService:
     def __init__(self, cfg, db, embedder, vectorstore, reid=None):
@@ -58,7 +45,6 @@ class GroupService:
         self._group_allowed_classes = {} # gid -> set(allowed classes)
         self._ents = []      # [[eid, occ, np_centroid, space], ...]
         self._web_base = ""  # set by the server for notification click-through
-        self._vocab = None   # (labels, np matrix) cache for cluster hints
 
     # -- startup -----------------------------------------------------------
     def startup(self, web_base: str = "") -> None:
@@ -80,12 +66,13 @@ class GroupService:
                     print(f"[groups] entity backfill: processed {n} historical artifacts")
             except Exception as e:
                 print(f"[groups] entity backfill skipped: {e}")
-        # If there are no groups at all yet, seed suggestions from what we have.
-        if not self.db.list_groups():
-            try:
-                self.recluster()
-            except Exception as e:
-                print(f"[groups] initial recluster skipped: {e}")
+        # Unsupervised "suggested cluster" groups are retired — they were noisy and
+        # rarely useful. Clustering now only ever runs to populate a group the USER
+        # creates (backfill / from-artifact). Drop any leftover suggestions.
+        try:
+            self.db.delete_groups_by_kind("cluster")
+        except Exception as e:
+            print(f"[groups] cluster-suggestion cleanup skipped: {e}")
 
         # Delete old manual user-defined groups that are not key-value tags
         try:
@@ -115,51 +102,16 @@ class GroupService:
         except Exception as e:
             print(f"[groups] startup group upgrade failed: {e}")
 
-        # Start background recluster daemon
-        self._stop_event = threading.Event()
-        self._recluster_thread = threading.Thread(
-            target=self._recluster_loop, name="BackgroundRecluster", daemon=True
-        )
-        self._recluster_thread.start()
-
     def _safe_rebuild(self) -> None:
         try:
             self.rebuild_entities()
         except Exception as e:  # noqa: BLE001
             print(f"[groups] entity rebuild failed: {e}")
 
-    def _recluster_loop(self) -> None:
-        last_embedding_count = 0
-        try:
-            with self.db._lock:
-                last_embedding_count = self.db._conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-        except Exception:
-            pass
-
-        # Wait a bit on startup
-        time.sleep(10)
-        while not self._stop_event.is_set():
-            try:
-                with self.db._lock:
-                    count = self.db._conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-                if count != last_embedding_count:
-                    print(f"[groups] background recluster: embedding count changed ({last_embedding_count} -> {count}), reclustering...")
-                    self.recluster()
-                    last_embedding_count = count
-            except Exception as e:
-                print(f"[groups] background recluster error: {e}")
-            
-            # Sleep 60 seconds, checking for stop event in 1s steps
-            for _ in range(60):
-                if self._stop_event.is_set():
-                    break
-                time.sleep(1)
-
     def stop(self) -> None:
-        if hasattr(self, "_stop_event"):
-            self._stop_event.set()
-        if hasattr(self, "_recluster_thread"):
-            self._recluster_thread.join(timeout=2)
+        # Nothing to stop now that the background recluster daemon is gone; kept
+        # so callers (engine shutdown) don't need to know.
+        return
 
     def _entity_inputs(self, artifact_id, cls, clip_vec):
         """Return (vector, space, threshold) for entity resolution. ReID (which
@@ -314,161 +266,6 @@ class GroupService:
         classes = [r[2] for r in rows]
         X = np.stack([_norm(r[1]) for r in rows])
         return ids, X, classes
-
-    # -- clustering --------------------------------------------------------
-    def recluster(self) -> dict:
-        # Cluster only artifacts not already confirmed into a labeled group, so
-        # suggestions shrink as the user categorises instead of endlessly
-        # re-proposing things they've already handled.
-        ids, X, classes = self._matrix(self.db.embeddings_for_clustering())
-        if len(ids) < self.cfg.cluster_min_size:
-            return {"clusters": 0, "artifacts": len(ids)}
-
-        # Partition indices by primary class to prevent class mixing
-        by_class = {}
-        for i, cls in enumerate(classes):
-            if cls not in by_class:
-                by_class[cls] = []
-            by_class[cls].append(i)
-
-        clusters_to_save = []
-        for cls, indices in by_class.items():
-            if len(indices) < self.cfg.cluster_min_size:
-                continue
-            X_cls = X[indices]
-            
-            # Subspace Orthogonalization:
-            # 1. Compute category mean vector representing the generic class shape
-            mean_vec = _norm(X_cls.mean(axis=0))
-            
-            # 2. Subtract component of each embedding that points along the mean vector
-            projections = (X_cls @ mean_vec)[:, np.newaxis] * mean_vec
-            residuals = X_cls - projections
-            
-            # 3. Calculate residual norms and filter out generic baseline objects (norm < 0.30)
-            # This avoids amplifying random noise on standard objects that are close to the category mean.
-            residual_norms = np.linalg.norm(residuals, axis=1)
-            distinctive_idx = np.where(residual_norms >= 0.30)[0]
-            if len(distinctive_idx) < self.cfg.cluster_min_size:
-                continue
-
-            # Extract the subset of distinctive residuals and normalize them
-            residuals_distinct = residuals[distinctive_idx]
-            norms_distinct = residual_norms[distinctive_idx][:, np.newaxis]
-            R = residuals_distinct / norms_distinct
-
-            # 4. Compute Pairwise Similarity Matrix
-            S = R @ R.T  # shape: (M, M) where M = len(distinctive_idx)
-            M = len(distinctive_idx)
-            
-            # K-nearest neighbors (including self)
-            K = self.cfg.cluster_min_size  # e.g., 5
-            if M < K:
-                continue
-                
-            candidates = []
-            for i in range(M):
-                # Sort neighbors by similarity DESC
-                neighbors = np.argsort(-S[i])[:K]  # top K neighbors indices in distinctive space
-                
-                # Evaluate Cohesion: average pairwise similarity of neighbors
-                sub_S = S[neighbors][:, neighbors]
-                cohesion = float(sub_S.mean())
-                
-                # Evaluate Deviation: distance of neighborhood's original centroid to mean_vec
-                global_neighbors = [indices[distinctive_idx[n]] for n in neighbors]
-                centroid_orig = _norm(X[global_neighbors].mean(axis=0))
-                deviation = float(1.0 - (centroid_orig @ mean_vec))
-                
-                # Check threshold criteria:
-                # - cohesion >= 0.45 (highly cohesive)
-                # - deviation >= 0.20 (distinct from average category)
-                if cohesion >= 0.45 and deviation >= 0.20:
-                    candidates.append({
-                        "indices": set(global_neighbors),
-                        "deviation": deviation,
-                        "centroid": centroid_orig
-                    })
-                    
-            if not candidates:
-                continue
-                
-            # Sort candidates by deviation DESC (most distinct first)
-            candidates.sort(key=lambda c: -c["deviation"])
-            
-            # 5. Greedily merge overlapping neighborhoods
-            merged_clusters = []
-            for cand in candidates:
-                merged = False
-                for existing in merged_clusters:
-                    # If candidate overlaps significantly with existing (>= 40% overlap of candidate size)
-                    intersection = len(cand["indices"] & existing["indices"])
-                    if intersection / len(cand["indices"]) >= 0.40:
-                        existing["indices"].update(cand["indices"])
-                        merged = True
-                        break
-                if not merged:
-                    merged_clusters.append({
-                        "indices": cand["indices"],
-                        "deviation": cand["deviation"],
-                        "centroid": cand["centroid"]
-                    })
-                    
-            # 6. Save the final distinct clusters
-            for cluster in merged_clusters:
-                c_indices = list(cluster["indices"])
-                if len(c_indices) < self.cfg.cluster_min_size:
-                    continue
-                    
-                # Recompute final centroid for the merged cluster
-                centroid = _norm(X[c_indices].mean(axis=0))
-                deviation = float(1.0 - (centroid @ mean_vec))
-                
-                # Prepare members list (dot product to centroid in original space)
-                members = [
-                    (ids[i], float(X[i] @ centroid))
-                    for i in c_indices
-                ]
-                
-                # Sort members by similarity to centroid DESC
-                members.sort(key=lambda m: -m[1])
-                
-                # Get hint
-                hint = self._hint_for(centroid, [classes[i] for i in c_indices])
-                
-                clusters_to_save.append({
-                    "centroid": centroid.tolist(),
-                    "size": len(c_indices),
-                    "hint": hint,
-                    "deviation": deviation,
-                    "members": members
-                })
-
-        self.db.recluster_save(clusters_to_save)
-        return {"clusters": len(clusters_to_save), "artifacts": len(ids)}
-
-    def _vocab_matrix(self):
-        """Lazily embed the hint vocabulary once (CLIP text space)."""
-        if self._vocab is not None:
-            return self._vocab
-        vecs = []
-        for phrase in HINT_VOCAB:
-            tv = self.embedder.embed_text(phrase)
-            vecs.append(_norm(tv) if tv is not None else None)
-        if any(v is None for v in vecs):
-            self._vocab = ([], None)
-        else:
-            self._vocab = (HINT_VOCAB, np.stack(vecs))
-        return self._vocab
-
-    def _hint_for(self, centroid, member_classes) -> str | None:
-        """Best concept for a cluster centroid, falling back to dominant class."""
-        if member_classes:
-            top = max(set(member_classes), key=member_classes.count)
-            if top == "person":
-                return "people"
-            return f"{top}s"
-        return "objects"
 
     # -- labeled group creation -------------------------------------------
     def name_cluster(self, group_id: int, name: str) -> None:

@@ -159,8 +159,6 @@ export interface Entity {
 export type ScoredArtifact = Artifact & { score?: number };
 
 export const getGroups = () => api<Group[]>("/api/groups");
-export const recluster = () =>
-  api<{ clusters: number; artifacts: number }>("/api/groups/recluster", { method: "POST" });
 export const createGroupFromText = (name: string, prompt: string) =>
   api<{ group_id: number; members: number }>("/api/groups/from-text", {
     method: "POST", body: JSON.stringify({ name, prompt }),
