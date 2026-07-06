@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   deleteGroup, getGroupMembers, getGroups, nameGroup, setGroupNotify,
   setMemberStatus, setMembersBatchStatus, backfillGroup, withToken,
-  tagArtifacts, getTagsAutocomplete, dropRemainingSuggestions, type Artifact, type Group,
+  tagArtifacts, getTagsAutocomplete, acceptRemainingSuggestions, type Artifact, type Group,
 } from "../api";
 import { IconBack, IconBell, IconTrash } from "../lib";
 
@@ -94,20 +94,20 @@ export default function GroupDetail() {
     }
   }
 
-  async function dropRemaining() {
-    if (!window.confirm("Drop all remaining suggested matches for this group? (Confirmed items will be kept)")) return;
-    
-    // Optimistically clear suggested items from UI
+  async function acceptRemaining() {
+    if (!window.confirm("Accept all remaining suggestions as correct, and auto-classify future matches for this group?")) return;
+
+    // Optimistically mark pending items as confirmed
     setMembers((ms) => {
       if (!ms) return ms;
-      return ms.filter((m) => m.member_status === "confirmed");
+      return ms.map((m) => (m.member_status === "rejected" ? m : { ...m, member_status: "confirmed" as const }));
     });
 
     try {
-      await dropRemainingSuggestions(gid);
+      await acceptRemainingSuggestions(gid);
       load();
     } catch (e) {
-      console.error("Failed to drop remaining suggestions", e);
+      console.error("Failed to accept remaining suggestions", e);
     }
   }
 
@@ -485,11 +485,11 @@ export default function GroupDetail() {
               {members && members.some((m) => m.member_status !== "confirmed") && (
                 <div className="flex gap-2">
                   <button
-                    onClick={dropRemaining}
-                    className="rounded-lg border border-zinc-500/30 bg-zinc-500/10 px-2.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-500/20 active:scale-95 transition"
-                    title="Drop remaining suggestions without negative training penalty"
+                    onClick={acceptRemaining}
+                    className="rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent hover:bg-accent/20 active:scale-95 transition"
+                    title="Accept remaining suggestions and auto-classify future matches"
                   >
-                    🗑️ Drop Remaining
+                    ✓ Accept Remaining
                   </button>
                   <button
                     onClick={discardNegatives}

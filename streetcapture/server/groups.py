@@ -301,8 +301,9 @@ class GroupService:
                       for (eid, occ, c, space) in self.db.entity_centroids()]
 
     # -- embeddings matrix -------------------------------------------------
-    def _matrix(self):
-        rows = self.db.all_embeddings()
+    def _matrix(self, rows=None):
+        if rows is None:
+            rows = self.db.all_embeddings()
         if not rows:
             return [], np.zeros((0, 1), "float32"), []
         ids = [r[0] for r in rows]
@@ -312,7 +313,10 @@ class GroupService:
 
     # -- clustering --------------------------------------------------------
     def recluster(self) -> dict:
-        ids, X, classes = self._matrix()
+        # Cluster only artifacts not already confirmed into a labeled group, so
+        # suggestions shrink as the user categorises instead of endlessly
+        # re-proposing things they've already handled.
+        ids, X, classes = self._matrix(self.db.embeddings_for_clustering())
         if len(ids) < self.cfg.cluster_min_size:
             return {"clusters": 0, "artifacts": len(ids)}
 
@@ -698,26 +702,19 @@ class GroupService:
             thr = (self.cfg.label_match_threshold if group_id in self._seeded
                    else self.cfg.group_match_threshold)
 
-        with self.db._lock:
-            confirmed_count = self.db._conn.execute(
-                "SELECT COUNT(*) FROM group_members WHERE group_id=? AND status='confirmed'",
-                (group_id,)
-            ).fetchone()[0]
-
-        # Auto-confirm only for cosine (mean-centroid) groups; the +0.08/0.85
-        # margin is meaningless against a calibrated LR score, so those add as
-        # unconfirmed 'auto' for the user to curate.
-        auto_label_thr = max(0.85, thr + 0.08)
+        # Once a group is trusted (enough human confirmations), backfilled
+        # matches are auto-classified rather than dumped into the verify queue.
+        confident = self.db.human_confirmed_count(group_id) >= self.cfg.auto_classify_min_confirmed
         to_add = []
         for i in range(len(ids)):
             if allowed and classes[i] not in allowed:
                 continue
             if sims[i] >= thr and ids[i] not in rejected and ids[i] not in existing:
-                if mthr is None and confirmed_count >= 10 and sims[i] >= auto_label_thr:
+                if confident:
                     to_add.append((ids[i], float(sims[i]), "auto_confirm", "confirmed"))
                 else:
                     to_add.append((ids[i], float(sims[i]), "auto"))
-        
+
         self.db.add_members(group_id, to_add)
         return len(to_add)
 
@@ -850,16 +847,10 @@ class GroupService:
             if artifact_id in self.db.rejected_member_ids(gid):
                 continue
 
-            with self.db._lock:
-                confirmed_count = self.db._conn.execute(
-                    "SELECT COUNT(*) FROM group_members WHERE group_id=? AND status='confirmed'",
-                    (gid,)
-                ).fetchone()[0]
-
-            # Auto-confirm only for mean-centroid (cosine) groups, where the
-            # +0.08/0.85 margin is meaningful. For calibrated LR groups the score
-            # scale differs, so add as unconfirmed 'auto' and let the user curate.
-            if mthr is None and confirmed_count >= 10 and s >= max(0.85, thr + 0.08):
+            # Once a group has enough human confirmations it's trusted: matches
+            # above its threshold are auto-classified (confirmed) with no verify
+            # queue. Below that bar they stay as 'auto' suggestions to review.
+            if self.db.human_confirmed_count(gid) >= self.cfg.auto_classify_min_confirmed:
                 self.db.add_member(gid, artifact_id, s, "auto_confirm", "confirmed")
             else:
                 self.db.add_member(gid, artifact_id, s, "auto")
@@ -898,7 +889,11 @@ class GroupService:
             pos_vecs = seeds
             basis = "seeds"
         else:
-            pos_vecs = self.db.group_member_vectors(group_id, status="confirmed")
+            # Train on HUMAN-confirmed examples only — machine auto-classified
+            # members (source='auto_confirm') must not drift the model toward its
+            # own predictions.
+            pos_vecs = self.db.group_member_vectors(
+                group_id, status="confirmed", exclude_auto_confirm=True)
             basis = "confirmed"
             if not pos_vecs:
                 pos_vecs = self.db.group_member_vectors(group_id, exclude_rejected=True)

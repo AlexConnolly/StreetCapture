@@ -590,17 +590,15 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         background_tasks.add_task(gs.train_and_backfill, group_id)
         return {"ok": True}
 
-    @app.post("/api/groups/{group_id}/drop-remaining", dependencies=[guard])
-    def group_drop_remaining(group_id: int, background_tasks: BackgroundTasks):
+    @app.post("/api/groups/{group_id}/accept-remaining", dependencies=[guard])
+    def group_accept_remaining(group_id: int, background_tasks: BackgroundTasks):
+        """'I've reviewed enough — accept the rest.' Confirms every pending
+        suggestion (auto-classified, so they don't retrain the centroid) and,
+        once the group is trusted, future matches auto-classify too."""
         gs = app.state.service.groups
-        with gs.db._lock:
-            gs.db._conn.execute(
-                "DELETE FROM group_members WHERE group_id=? AND status IS NULL",
-                (group_id,)
-            )
-            gs.db._conn.commit()
+        accepted = gs.db.accept_pending_members(group_id)
         background_tasks.add_task(gs.train_and_backfill, group_id)
-        return {"ok": True}
+        return {"ok": True, "accepted": accepted}
 
     @app.post("/api/groups/{group_id}/backfill", dependencies=[guard])
     def group_backfill(group_id: int, threshold: float | None = Query(None)):

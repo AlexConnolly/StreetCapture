@@ -129,6 +129,12 @@ class Config:
     live_label_interval_s: float = float(_env("STREETCAPTURE_LIVE_LABEL_INTERVAL", "1.5"))
     live_label_budget: int = int(_env("STREETCAPTURE_LIVE_LABEL_BUDGET", "1"))  # embeds/frame
     group_match_threshold: float = float(_env("STREETCAPTURE_GROUP_MATCH", "0.72"))  # image cosine to auto-tag
+    # Once a group has this many HUMAN-confirmed examples it is trusted to
+    # auto-classify: any artifact clearing its match threshold is confirmed
+    # automatically instead of queued for you to verify. Auto-classified items
+    # (source='auto_confirm') do NOT feed centroid training, so the model stays
+    # anchored to your hand-labelled examples.
+    auto_classify_min_confirmed: int = int(_env("STREETCAPTURE_AUTOCLASSIFY_MIN", "10"))
     # Stricter bar when retro-applying a freshly-taught region label to existing
     # artifacts — a single drawn crop is a weak prototype, so keep it precise
     # (common things like 'a person' look alike in CLIP and would otherwise flood).

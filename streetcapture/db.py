@@ -282,6 +282,22 @@ class Database:
             ).fetchall()
         return [(r[0], unpack_vector(r[1]), r[2]) for r in rows]
 
+    def embeddings_for_clustering(self) -> list[tuple]:
+        """Like all_embeddings, but excludes artifacts already confirmed into a
+        labeled group. Those are categorised, so re-proposing them as fresh
+        cluster suggestions just nags about things the user has handled."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT e.artifact_id, e.vector, a.primary_class "
+                "FROM embeddings e JOIN artifacts a ON a.id=e.artifact_id "
+                "WHERE e.artifact_id NOT IN ("
+                "  SELECT gm.artifact_id FROM group_members gm "
+                "  JOIN groups g ON g.id=gm.group_id "
+                "  WHERE g.kind='labeled' AND gm.status='confirmed') "
+                "ORDER BY e.artifact_id"
+            ).fetchall()
+        return [(r[0], unpack_vector(r[1]), r[2]) for r in rows]
+
     def embedding_for(self, artifact_id: int):
         with self._lock:
             r = self._conn.execute(
@@ -417,11 +433,14 @@ class Database:
         return [(r[0], r[1], r[2], r[3], unpack_vector(r[4]), r[5]) for r in rows]
 
     def group_member_vectors(self, group_id: int, status: str | None = None,
-                             exclude_rejected: bool = False) -> list:
+                             exclude_rejected: bool = False,
+                             exclude_auto_confirm: bool = False) -> list:
         """Member embedding vectors, optionally filtered by feedback status.
 
-        status='confirmed' -> only thumbs-up members.
-        exclude_rejected   -> everything except thumbs-down members.
+        status='confirmed'   -> only thumbs-up members.
+        exclude_rejected     -> everything except thumbs-down members.
+        exclude_auto_confirm -> drop machine auto-classified members, so only
+                                human-vouched examples train the centroid.
         """
         sql = ("SELECT e.vector FROM group_members gm "
                "JOIN embeddings e ON e.artifact_id=gm.artifact_id WHERE gm.group_id=?")
@@ -430,9 +449,30 @@ class Database:
             sql += " AND gm.status=?"; params.append(status)
         elif exclude_rejected:
             sql += " AND (gm.status IS NULL OR (gm.status!='rejected' AND gm.status!='removed'))"
+        if exclude_auto_confirm:
+            sql += " AND (gm.source IS NULL OR gm.source!='auto_confirm')"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [unpack_vector(r[0]) for r in rows]
+
+    def human_confirmed_count(self, group_id: int) -> int:
+        """Members the user actually vouched for (confirmed, not machine
+        auto-classified). This is the signal that a group is trustworthy."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM group_members WHERE group_id=? AND status='confirmed' "
+                "AND (source IS NULL OR source!='auto_confirm')", (group_id,)).fetchone()[0]
+
+    def accept_pending_members(self, group_id: int) -> int:
+        """Accept every un-reviewed suggestion in a group: mark it confirmed and
+        auto-classified. They show as classified but don't train the centroid
+        (the user bulk-accepted rather than individually vouching for each)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE group_members SET status='confirmed', source='auto_confirm' "
+                "WHERE group_id=? AND status IS NULL", (group_id,))
+            self._conn.commit()
+            return cur.rowcount
 
     def background_negative_vectors(self, group_id: int, classes: list[str], limit: int = 200) -> list:
         """Fetch other vectors of the same classes that are not in the specified group."""
