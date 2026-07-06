@@ -10,6 +10,8 @@ No similarity search here — v0.2 only *builds* the vector database.
 
 from __future__ import annotations
 
+import threading
+
 import cv2
 import numpy as np
 
@@ -21,9 +23,13 @@ class Embedder:
         self.preprocess = None
         self.device = "cpu"
         self.model_version = "stub-gray16"
+        # The model is shared by the artifact thread and the live-label thread;
+        # serialise forward passes (PyTorch modules aren't concurrency-safe).
+        self._lock = threading.Lock()
         if not cfg.embed_enabled:
             self.model_version = "disabled"
             return
+        self.tokenizer = None
         try:
             import open_clip
             import torch
@@ -33,6 +39,7 @@ class Embedder:
                 cfg.embed_model, pretrained=cfg.embed_pretrained, device=self.device
             )
             self.model.eval()
+            self.tokenizer = open_clip.get_tokenizer(cfg.embed_model)
             self._torch = torch
             self.model_version = f"open_clip/{cfg.embed_model}:{cfg.embed_pretrained}"
         except Exception as e:  # missing package, no weights, OOM, etc.
@@ -51,13 +58,35 @@ class Embedder:
 
             rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
             tensor = self.preprocess(Image.fromarray(rgb)).unsqueeze(0).to(self.device)
-            with self._torch.no_grad():
+            with self._lock, self._torch.no_grad():
                 feat = self.model.encode_image(tensor)
                 feat = feat / feat.norm(dim=-1, keepdim=True)
             return [round(float(x), 6) for x in feat.squeeze(0).cpu().tolist()]
         except Exception as e:
             print(f"[embeddings] encode failed ({e}); using stub.")
             return self._stub(crop_bgr)
+
+    def embed_text(self, text: str):
+        """Encode a text prompt into the SAME space as image embeddings (CLIP).
+
+        Enables zero-shot search: 'a DPD delivery van' -> matching artifacts.
+        Returns None if the CLIP text encoder isn't available (stub mode).
+        """
+        if self.model is None or self.tokenizer is None:
+            return None
+        try:
+            tokens = self.tokenizer([text]).to(self.device)
+            with self._lock, self._torch.no_grad():
+                feat = self.model.encode_text(tokens)
+                feat = feat / feat.norm(dim=-1, keepdim=True)
+            return [round(float(x), 6) for x in feat.squeeze(0).cpu().tolist()]
+        except Exception as e:
+            print(f"[embeddings] text encode failed ({e})")
+            return None
+
+    @property
+    def text_available(self) -> bool:
+        return self.model is not None and self.tokenizer is not None
 
     @staticmethod
     def _stub(crop_bgr):

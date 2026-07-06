@@ -39,8 +39,36 @@ class Config:
 
     # --- Track lifecycle --------------------------------------------------
     stay_seconds: float = float(_env("STREETCAPTURE_STAY_SECONDS", "8"))
-    forget_seconds: float = float(_env("STREETCAPTURE_FORGET_SECONDS", "3"))
+    # Finalise a track into an artifact only after it's been gone this long. Must
+    # be >= the tracker's revive window (track_buffer/fps ~5-7s), otherwise a
+    # brief detection dropout finalises artifact #1 and the SAME object (same
+    # track id) revives as artifact #2 — i.e. one car in frame counted twice.
+    forget_seconds: float = float(_env("STREETCAPTURE_FORGET_SECONDS", "7"))
     max_positions: int = int(_env("STREETCAPTURE_MAX_POSITIONS", "300"))
+    # Two sightings of the SAME entity closer than this are one "visit" (collapses
+    # any residual fragmentation from track-id changes at the display level).
+    visit_gap_seconds: float = float(_env("STREETCAPTURE_VISIT_GAP", "120"))
+
+    # --- Background / idle-object suppression -----------------------------
+    # An object that sits motionless in the same spot for > background_seconds
+    # (a potted plant, a permanently-parked car) becomes scene BACKGROUND: its
+    # box is hidden and it stops generating artifacts. ANY motion resets the
+    # timer, so a car is shown while driving in + for background_seconds after it
+    # parks (arrival captured), then goes quiet, and is flagged again when it
+    # leaves. A location cleared for background_forget_seconds resets, so a fresh
+    # arrival there is new again.
+    background_suppress: bool = _env("STREETCAPTURE_BG_SUPPRESS", "1") == "1"
+    background_seconds: float = float(_env("STREETCAPTURE_BG_SECONDS", "300"))     # motionless -> background
+    background_forget_seconds: float = float(_env("STREETCAPTURE_BG_FORGET", "60"))  # cleared -> reset
+    # ByteTrack keeps a lost track alive for this many frames before retiring its
+    # ID. Default ultralytics value is 30 (~2s @15fps); we raise it so someone
+    # who ducks behind a billboard/pole for a few seconds keeps the same ID.
+    track_buffer: int = int(_env("STREETCAPTURE_TRACK_BUFFER", "75"))  # ~5s @15fps
+    # Tracker: 'bytetrack' (motion only, fast) or 'botsort' (adds appearance
+    # ReID so an object keeps its ID across a jump/gap — the fix for IDs churning
+    # when the stream stalls). Camera is static so GMC is disabled either way.
+    tracker: str = _env("STREETCAPTURE_TRACKER", "botsort")
+    track_reid: bool = _env("STREETCAPTURE_TRACK_REID", "1") == "1"
 
     # --- Artifact gating (a completed track becomes an Artifact only if it
     #     clears ALL of these) --------------------------------------------
@@ -65,9 +93,68 @@ class Config:
     # --- Storage ---------------------------------------------------------
     artifacts_dir: Path = Path(_env("STREETCAPTURE_ARTIFACTS_DIR", "artifacts"))
 
+    # --- DVR continuous recording (24h scrub-back) -----------------------
+    # A separate ffmpeg process records the RTSP stream into short mp4 segments
+    # so the web UI can scrub back through the last N hours. `-c copy` by default
+    # (no re-encode: lightest on CPU, exact camera quality). Point record_source
+    # at the camera's sub-stream (e.g. .../stream2) to save disk if needed.
+    record_enabled: bool = _env("STREETCAPTURE_RECORD", "1") == "1"
+    record_source: str = _env("STREETCAPTURE_RECORD_SOURCE", "")   # blank -> use `source`
+    record_segment_s: int = int(_env("STREETCAPTURE_RECORD_SEGMENT", "120"))   # mp4 chunk length
+    record_retention_h: float = float(_env("STREETCAPTURE_RECORD_RETENTION_H", "24"))
+    record_scale: str = _env("STREETCAPTURE_RECORD_SCALE", "")     # e.g. "1280:-2"; blank -> copy
+    record_crf: int = int(_env("STREETCAPTURE_RECORD_CRF", "23"))  # only used when re-encoding
+
+    # --- Movement scrobbler ----------------------------------------------
+    # Per-frame, a track only counts as "moving" if its centroid shifts more
+    # than this fraction of its own bbox diagonal (kills box jitter on parked
+    # cars / standing people). Movement energy is summed per minute for the
+    # timeline so the spikes reflect motion, not static presence.
+    movement_deadzone_frac: float = float(_env("STREETCAPTURE_MOVE_DEADZONE", "0.06"))
+
     # --- Display ---------------------------------------------------------
     show_live: bool = _env("STREETCAPTURE_SHOW_LIVE", "1") == "1"
     show_dashboard: bool = _env("STREETCAPTURE_SHOW_DASHBOARD", "1") == "1"
+
+    # --- v2: groups / entities / notifications ---------------------------
+    cluster_distance: float = float(_env("STREETCAPTURE_CLUSTER_DIST", "0.28"))  # cosine dist, complete linkage
+    cluster_min_size: int = int(_env("STREETCAPTURE_CLUSTER_MIN", "5"))
+
+    # --- Live labels: tag tracks on the live video with taught group labels --
+    # Rate-limited so it barely touches the GPU: each track's crop is CLIP-matched
+    # against your labeled prototypes at most every `interval` seconds, capped at
+    # `budget` embeds per frame.
+    live_label_enabled: bool = _env("STREETCAPTURE_LIVE_LABELS", "1") == "1"
+    live_label_threshold: float = float(_env("STREETCAPTURE_LIVE_LABEL_MATCH", "0.78"))
+    live_label_interval_s: float = float(_env("STREETCAPTURE_LIVE_LABEL_INTERVAL", "1.5"))
+    live_label_budget: int = int(_env("STREETCAPTURE_LIVE_LABEL_BUDGET", "1"))  # embeds/frame
+    group_match_threshold: float = float(_env("STREETCAPTURE_GROUP_MATCH", "0.72"))  # image cosine to auto-tag
+    # Stricter bar when retro-applying a freshly-taught region label to existing
+    # artifacts — a single drawn crop is a weak prototype, so keep it precise
+    # (common things like 'a person' look alike in CLIP and would otherwise flood).
+    label_match_threshold: float = float(_env("STREETCAPTURE_LABEL_MATCH", "0.82"))
+    text_match_threshold: float = float(_env("STREETCAPTURE_TEXT_MATCH", "0.22"))    # text->image cosine
+    entity_threshold: float = float(_env("STREETCAPTURE_ENTITY_MATCH", "0.83"))      # same-instance cosine (CLIP, non-person)
+
+    # --- Person re-identification ----------------------------------------
+    # CLIP can't tell pedestrians apart (all embed as "a person"), so person
+    # ENTITIES use a dedicated ReID model instead — trained to separate people
+    # by build/clothing. Runs on the async artifact loop (CPU ~30ms/crop), never
+    # the live loop. Different-people cosine ~0.2, so a ~0.5 cut separates them.
+    reid_enabled: bool = _env("STREETCAPTURE_REID", "1") == "1"
+    reid_model: str = _env("STREETCAPTURE_REID_MODEL", "yolo26s-reid.onnx")
+    # 0.65 favours PURITY: different cars/people stay separate (no "one car seen
+    # 200×" blobs). Same instance may split into a couple of entities — the
+    # acceptable direction. Lower = merges more (risks blobs); higher = fragments.
+    reid_entity_threshold: float = float(_env("STREETCAPTURE_REID_ENTITY_MATCH", "0.65"))
+    # Entity rebuild uses COMPLETE-LINKAGE agglomerative clustering, not a running
+    # centroid — an item joins a cluster only if it's within this cosine distance
+    # of EVERY member, killing the "generic average" snowball that merged
+    # visibly-different people. 0.45 => members must be >0.55 cosine to each other.
+    entity_cluster_distance: float = float(_env("STREETCAPTURE_ENTITY_CLUSTER_DIST", "0.45"))
+    notify_cooldown_s: float = float(_env("STREETCAPTURE_NOTIFY_COOLDOWN", "300"))
+    ntfy_server: str = _env("STREETCAPTURE_NTFY_SERVER", "https://ntfy.sh")
+    ntfy_topic: str = _env("STREETCAPTURE_NTFY_TOPIC", "")   # blank = notifications disabled
 
     # --- Web server ------------------------------------------------------
     web_host: str = _env("STREETCAPTURE_WEB_HOST", "0.0.0.0")
@@ -89,6 +176,20 @@ class Config:
         return self.artifacts_dir / "faiss.index"
 
     @property
+    def recordings_dir(self) -> Path:
+        return self.artifacts_dir / "recordings"
+
+    @property
+    def library_dir(self) -> Path:
+        """Saved clips — pulled out of the 24h prune cycle, kept forever."""
+        return self.artifacts_dir / "library"
+
+    @property
+    def tracker_cfg_path(self) -> Path:
+        """Generated ByteTrack yaml (track_buffer applied)."""
+        return self.artifacts_dir / "bytetrack.yaml"
+
+    @property
     def cv_source(self):
         """OpenCV wants an int for webcams, a string for URLs / files."""
         return int(self.source) if str(self.source).isdigit() else self.source
@@ -100,3 +201,6 @@ class Config:
     def ensure_dirs(self) -> None:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir.mkdir(parents=True, exist_ok=True)
+        if self.record_enabled:
+            self.recordings_dir.mkdir(parents=True, exist_ok=True)
+            self.library_dir.mkdir(parents=True, exist_ok=True)

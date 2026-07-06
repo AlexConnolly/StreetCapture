@@ -2,11 +2,12 @@ import { NavLink, useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { useAuth } from "../auth";
 import {
-  IconBell, IconChart, IconChat, IconGrid, IconLive, IconLogout,
+  IconBell, IconChart, IconChat, IconGrid, IconGroups, IconLive, IconLogout,
 } from "../lib";
 
 const TABS = [
   { to: "/live", label: "Live", Icon: IconLive },
+  {to: "/groups", label: "Discover", Icon: IconGroups},
   { to: "/artifacts", label: "Artifacts", Icon: IconGrid },
   { to: "/events", label: "Events", Icon: IconBell },
   { to: "/ask", label: "Ask", Icon: IconChat },
@@ -40,15 +41,15 @@ export function Shell({ title, online, children, flush }: {
 
       <main className={`flex-1 overflow-y-auto ${flush ? "" : "p-4"}`}>{children}</main>
 
-      <nav className="grid grid-cols-5 border-t border-line bg-panel"
+      <nav className="grid grid-cols-6 border-t border-line bg-panel"
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
         {TABS.map(({ to, label, Icon }) => (
           <NavLink key={to} to={to}
             className={({ isActive }) =>
-              `flex flex-col items-center gap-1 py-2.5 text-[11px] ${
+              `flex flex-col items-center gap-1 py-2.5 text-[10px] ${
                 isActive ? "text-accent" : "text-zinc-500"
               }`}>
-            <Icon className="h-[22px] w-[22px]" />
+            <Icon className="h-5 w-5" />
             {label}
           </NavLink>
         ))}

@@ -21,18 +21,26 @@ def _cat(cls_name: str) -> str:
     return "other"
 
 
-def draw_live(frame, tracks, fps, live_meta=None):
-    """Boxes + class + track ID + per-track analysis state (age / size / artifact-pending)."""
+def draw_live(frame, tracks, fps, live_meta=None, track_labels=None):
+    """Boxes + class + track ID + per-track analysis state (age / size / artifact-pending).
+    If a track matches a taught label ('Santander Bike'), that's shown on top."""
     live_meta = live_meta or {}
+    track_labels = track_labels or {}
     for t in tracks:
         x1, y1, x2, y2 = (int(v) for v in t["bbox"])
-        color = CAT_COLOR[_cat(t["class"])]
+        lab = track_labels.get(t["track_id"], {})
+        taught = lab.get("label")
+        # A recognised taught label gets a bright cyan box; otherwise category colour.
+        color = (255, 220, 0) if taught else CAT_COLOR[_cat(t["class"])]
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
         meta = live_meta.get(t["track_id"], {})
         pending = meta.get("pending", False)
-        # Line 1: identity + confidence. Line 2: what the artifact loop is doing.
-        l1 = f"{t['class']} #{t['track_id']} {t['confidence']:.2f}"
+        # Line 1: the taught label if we have one, else class + id + confidence.
+        if taught:
+            l1 = f"{taught} {lab.get('score', 0):.0%}"
+        else:
+            l1 = f"{t['class']} #{t['track_id']} {t['confidence']:.2f}"
         size = f"{x2 - x1}x{y2 - y1}"
         age = meta.get("age")
         state = "ARTIFACT PENDING" if pending else "analysing"

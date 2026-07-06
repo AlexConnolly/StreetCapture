@@ -1,5 +1,5 @@
 opencv-python>=4.8
-ultralytics>=8.1
+ultralytics>=8.4          # 8.4 ships the yolo26*-reid ReID assets
 numpy>=1.24
 torch>=2.0
 filterpy>=1.4.5
@@ -13,3 +13,11 @@ pillow>=10.0
 
 # v1.0 — vector index for the artifact embeddings
 faiss-cpu>=1.8
+
+# web server + v2 grouping / identity
+fastapi>=0.110
+uvicorn>=0.29
+pyjwt>=2.8
+python-multipart>=0.0.9
+scikit-learn>=1.4          # agglomerative clustering (suggested groups)
+onnxruntime>=1.17          # runs the person-ReID model (CPU)

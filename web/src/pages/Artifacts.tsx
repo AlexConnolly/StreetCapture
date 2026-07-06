@@ -12,6 +12,9 @@ const FILTERS = [
   { label: "Cars", cls: "car" },
   { label: "Trucks", cls: "truck" },
   { label: "Buses", cls: "bus" },
+  { label: "Motorcycles", cls: "motorcycle" },
+  { label: "Motorbikes", cls: "motorbike" },
+  { label: "Bicycles", cls: "bicycle" },
 ];
 
 export default function Artifacts() {

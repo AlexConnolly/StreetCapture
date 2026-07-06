@@ -69,13 +69,15 @@ class TrackAccumulator:
 
 
 class ArtifactEngine:
-    def __init__(self, cfg, state, db, embedder, vectorstore, session_id):
+    def __init__(self, cfg, state, db, embedder, vectorstore, session_id, artifact_hook=None):
         self.cfg = cfg
         self.state = state
         self.db = db
         self.embedder = embedder
         self.vectorstore = vectorstore
         self.session_id = session_id
+        # optional callback(artifact_id, embedding, class) -> group/entity learning
+        self.artifact_hook = artifact_hook
         self.tracks: dict[int, TrackAccumulator] = {}
         self._lock = threading.Lock()
         self._running = False
@@ -268,6 +270,9 @@ class ArtifactEngine:
                 self.db.insert_embedding(artifact_id, vec, self.embedder.model_version)
                 if self.vectorstore is not None:
                     self.vectorstore.add(artifact_id, vec)
+                # v2 learning loop: entity resolution + group auto-tag + notify.
+                if self.artifact_hook is not None:
+                    self.artifact_hook(artifact_id, vec, cls)
 
         self.artifact_counts[category(cls)] += 1
         self.daily_counts[category(cls)] += 1
