@@ -67,7 +67,7 @@ class PerceptionService:
         self.groups.startup()
         self.artifact = ArtifactEngine(
             self.cfg, self.state, self.db, self.embedder, self.vectorstore, self.session_id,
-            artifact_hook=self.groups.on_new_artifact,
+            artifact_hook=self.groups.on_new_artifact, reid=self.reid,
         ).start()
         if self.cfg.record_enabled:
             self.recorder = Recorder(self.cfg).start()

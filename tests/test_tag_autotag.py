@@ -275,3 +275,28 @@ def test_resync_adds_and_removes_in_one_pass(service):
     assert stale not in db.group_members(gid), "stale auto-tag was not swept"
     assert set(males) <= set(db.group_members(gid))
     assert res["added"] >= 1 and res["removed"] >= 1
+
+
+def test_clear_pending_keeps_confirmed_and_doesnt_reject(service):
+    """'Clear & retry' drops un-reviewed suggestions without judging them: pending
+    gone, confirmed + auto-classified kept, and nothing marked as a negative."""
+    gs, db = service
+    males = [_add_artifact(db, "person", _vec(1.0, 0.0)),
+             _add_artifact(db, "person", _vec(0.98, 0.10))]
+    gs.tag_artifacts(males, [{"key": "gender", "value": "male"}])
+    gid = _tag_group_id(db, "gender", "male")[0]
+
+    p1 = _add_artifact(db, "person", _vec(0.9, 0.2))
+    p2 = _add_artifact(db, "person", _vec(0.8, 0.3))
+    db.add_member(gid, p1, 0.5, "auto")                      # pending
+    db.add_member(gid, p2, 0.5, "auto")                      # pending
+    ac = _add_artifact(db, "person", _vec(0.97, 0.05))
+    db.add_member(gid, ac, 0.9, "auto_confirm", "confirmed")  # machine-classified
+
+    cleared = db.clear_pending_members(gid)
+
+    members = set(db.group_members(gid))
+    assert cleared == 2
+    assert p1 not in members and p2 not in members            # pending dropped
+    assert set(males) <= members and ac in members            # kept
+    assert db.group_member_vectors(gid, status="rejected") == []  # not trained as negatives

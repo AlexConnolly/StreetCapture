@@ -608,6 +608,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=r["error"])
         return {"ok": True, **r}
 
+    @app.post("/api/groups/{group_id}/clear-suggestions", dependencies=[guard])
+    def group_clear_suggestions(group_id: int, background_tasks: BackgroundTasks):
+        """'You overwhelmed me — bin these and try again with what I picked.' Drops
+        the un-reviewed suggestions without judging them (no approve/deny/classify),
+        then re-derives a fresh set from the examples the user confirmed."""
+        gs = app.state.service.groups
+        cleared = gs.db.clear_pending_members(group_id)
+        background_tasks.add_task(gs.resync_group, group_id)
+        return {"ok": True, "cleared": cleared}
+
     @app.post("/api/groups/{group_id}/backfill", dependencies=[guard])
     def group_backfill(group_id: int, threshold: float | None = Query(None)):
         gs = app.state.service.groups

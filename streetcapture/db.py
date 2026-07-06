@@ -516,6 +516,17 @@ class Database:
                 (group_id,)).fetchall()
         return [r[0] for r in rows]
 
+    def clear_pending_members(self, group_id: int) -> int:
+        """Drop every un-reviewed suggestion (status NULL) from a group without
+        judging them — not confirmed, not rejected, not auto-classified. For
+        'you've overwhelmed me; keep what I picked and start the suggestions over'.
+        Returns how many were cleared."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM group_members WHERE group_id=? AND status IS NULL", (group_id,))
+            self._conn.commit()
+            return cur.rowcount
+
     def auto_classified_member_ids(self, group_id: int) -> list[int]:
         """Members the MACHINE classified (source='auto_confirm'). These are the
         only ones a reject-sweep may retract — never the user's confirmations."""

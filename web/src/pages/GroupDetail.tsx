@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   deleteGroup, getGroupMembers, getGroups, nameGroup, setGroupNotify,
   setMemberStatus, setMembersBatchStatus, backfillGroup, withToken,
-  tagArtifacts, getTagsAutocomplete, autoClassifyRemaining, type Artifact, type Group,
+  tagArtifacts, getTagsAutocomplete, autoClassifyRemaining, clearSuggestions, type Artifact, type Group,
 } from "../api";
 import { IconBack, IconBell, IconTrash } from "../lib";
 
@@ -108,6 +108,23 @@ export default function GroupDetail() {
       load();
     } catch (e) {
       console.error("Failed to auto-classify remaining suggestions", e);
+    }
+  }
+
+  async function clearAndRetry() {
+    if (!window.confirm("Clear all current suggestions and try again with just the ones you've confirmed? (They're not approved, rejected or trained on — the group re-suggests from your picks.)")) return;
+
+    // Optimistically drop the un-reviewed suggestions from view.
+    setMembers((ms) => {
+      if (!ms) return ms;
+      return ms.filter((m) => m.member_status === "confirmed");
+    });
+
+    try {
+      await clearSuggestions(gid);
+      load();
+    } catch (e) {
+      console.error("Failed to clear suggestions", e);
     }
   }
 
@@ -490,6 +507,13 @@ export default function GroupDetail() {
                     title="I've done enough training — let the model classify the rest (matches get tagged, others dropped)"
                   >
                     ⚡ Auto-classify Rest
+                  </button>
+                  <button
+                    onClick={clearAndRetry}
+                    className="rounded-lg border border-zinc-500/30 bg-zinc-500/10 px-2.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-500/20 active:scale-95 transition"
+                    title="Overwhelmed? Clear these suggestions (not approved/rejected/trained) and re-suggest from what you've confirmed"
+                  >
+                    ↻ Clear & Retry
                   </button>
                   <button
                     onClick={discardNegatives}

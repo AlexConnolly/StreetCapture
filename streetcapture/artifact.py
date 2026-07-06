@@ -20,6 +20,7 @@ from collections import Counter, defaultdict, deque
 import cv2
 
 from . import db, quality, taxonomy
+from .reid import dominant_indices
 from .taxonomy import category
 
 
@@ -69,12 +70,14 @@ class TrackAccumulator:
 
 
 class ArtifactEngine:
-    def __init__(self, cfg, state, db, embedder, vectorstore, session_id, artifact_hook=None):
+    def __init__(self, cfg, state, db, embedder, vectorstore, session_id,
+                 artifact_hook=None, reid=None):
         self.cfg = cfg
         self.state = state
         self.db = db
         self.embedder = embedder
         self.vectorstore = vectorstore
+        self.reid = reid            # person-ReID; used to keep 1 artifact == 1 person
         self.session_id = session_id
         # optional callback(artifact_id, embedding, class) -> group/entity learning
         self.artifact_hook = artifact_hook
@@ -221,7 +224,8 @@ class ArtifactEngine:
         return True, "ok"
 
     def _create_artifact(self, acc, track_pk, cls, avg_conf, now) -> None:
-        reps = self._select_representatives(acc.samples)
+        samples = self._dominant_person_samples(acc.samples) if cls == "person" else acc.samples
+        reps = self._select_representatives(samples)
         rep_bbox = reps[0].bbox if reps else (acc.samples[-1].bbox if acc.samples else [0, 0, 0, 0])
         artifact_id = self.db.insert_artifact({
             "track_pk": track_pk,
@@ -297,6 +301,34 @@ class ArtifactEngine:
             self._emit({"type": "vehicle_passed", "artifact_id": artifact_id,
                         "source_track_id": acc.track_id, "class": cls,
                         "duration": acc.duration, "time": now})
+
+    def _dominant_person_samples(self, samples):
+        """A track can hop between people (ID switch on a crossing, or a lost track
+        reviving onto a stranger), which would scatter several people across one
+        artifact's frames — poison for labelling and the embedding. Embed each
+        candidate crop with the person-ReID model and keep only the frames that
+        match the dominant (highest-scoring) crop, so one artifact == one person.
+        No-ops if ReID is unavailable or the track is already consistent."""
+        if not (self.reid and self.reid.enabled) or len(samples) < 2:
+            return samples
+        embedded, vecs = [], []
+        for s in samples:
+            v = self.reid.embed(s.crop)
+            if v is not None:
+                embedded.append(s)
+                vecs.append(v)
+        if len(embedded) < 2:
+            return samples
+        keep = dominant_indices([s.score() for s in embedded], vecs,
+                                self.cfg.reid_entity_threshold)
+        # Nothing dropped -> track was consistent; return the originals untouched
+        # (don't discard frames we simply couldn't embed).
+        if len(keep) == len(embedded):
+            return samples
+        dropped = len(embedded) - len(keep)
+        print(f"[artifact] dominant-person filter: kept {len(keep)}/{len(embedded)} "
+              f"person crops (dropped {dropped} from an ID switch)")
+        return [embedded[i] for i in keep]
 
     def _select_representatives(self, samples):
         """Pick rep_min..rep_max crops: prefer visible ones, spread over the

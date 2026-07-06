@@ -16,6 +16,20 @@ import threading
 import numpy as np
 
 
+def dominant_indices(scores, vectors, threshold):
+    """Indices of the L2-normalised `vectors` that belong to the DOMINANT person
+    in a set — i.e. those with cosine >= threshold to the highest-`scored` vector
+    (the anchor). Used to drop frames a track picked up from a different person
+    after an ID switch, so one artifact ends up as one person. `scores` and
+    `vectors` are index-aligned; returns the anchor plus its matches."""
+    if not vectors:
+        return []
+    anchor = vectors[max(range(len(vectors)), key=lambda i: scores[i])]
+    anchor = np.asarray(anchor, dtype="float32")
+    return [i for i, v in enumerate(vectors)
+            if float(np.dot(np.asarray(v, dtype="float32"), anchor)) >= threshold]
+
+
 class ReIDEmbedder:
     def __init__(self, cfg):
         self.cfg = cfg
