@@ -581,8 +581,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="bad status")
         gs = app.state.service.groups
         gs.set_members_feedback(group_id, body.artifact_ids, body.status)
-        # A rejection is loud: relearn and sweep out other now-failing auto-tags.
-        task = gs.reclassify_group if body.status == "rejected" else gs.train_and_backfill
+        # A manual edit changes what the group means: re-derive the whole
+        # membership (add what now fits, drop what no longer does). 'removed' just
+        # sweeps, so the item you took off isn't immediately pulled back in.
+        task = gs.reclassify_group if body.status == "removed" else gs.resync_group
         background_tasks.add_task(task, group_id)
         return {"ok": True}
 
@@ -592,7 +594,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="bad status")
         gs = app.state.service.groups
         gs.set_member_feedback(group_id, artifact_id, body.status)
-        task = gs.reclassify_group if body.status == "rejected" else gs.train_and_backfill
+        task = gs.reclassify_group if body.status == "removed" else gs.resync_group
         background_tasks.add_task(task, group_id)
         return {"ok": True}
 

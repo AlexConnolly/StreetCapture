@@ -252,3 +252,26 @@ def test_reject_sweep_untags_machine_lookalikes(service):
     assert bad not in db.group_members(gid), "off-model auto-tag was not swept"
     assert good in db.group_members(gid), "on-model auto-tag wrongly swept"
     assert set(males) <= set(db.group_members(gid)), "human confirmations were touched"
+
+
+def test_resync_adds_and_removes_in_one_pass(service):
+    """A manual edit re-derives the whole group: pull in a candidate that now
+    matches AND drop a machine-tag that no longer does — both in one resync."""
+    gs, db = service
+    males = [_add_artifact(db, "person", _vec(1.0, 0.0)),
+             _add_artifact(db, "person", _vec(0.98, 0.10)),
+             _add_artifact(db, "person", _vec(0.98, -0.10))]
+    gs.tag_artifacts(males, [{"key": "gender", "value": "male"}])
+    gid = _tag_group_id(db, "gender", "male")[0]
+
+    newmatch = _add_artifact(db, "person", _vec(0.96, 0.04))   # on-model, NOT yet a member
+    stale = _add_artifact(db, "person", _vec(0.0, 1.0))         # off-model machine tag
+    db.add_member(gid, stale, 0.9, "auto_confirm", "confirmed")
+    gs._refresh_labeled()
+
+    res = gs.resync_group(gid)
+
+    assert newmatch in db.group_members(gid), "matching candidate was not pulled in"
+    assert stale not in db.group_members(gid), "stale auto-tag was not swept"
+    assert set(males) <= set(db.group_members(gid))
+    assert res["added"] >= 1 and res["removed"] >= 1

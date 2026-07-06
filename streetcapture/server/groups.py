@@ -105,15 +105,13 @@ class GroupService:
             labeled = [g for g in self.db.list_groups() if g["kind"] == "labeled" and g.get("tag_key") and g.get("tag_value")]
             swept = 0
             for g in labeled:
-                self._recompute_centroid(g["id"])
-                # Sweep out anything the machine auto-tagged that no longer clears
-                # the (now margin-based) threshold — cleans up low-confidence
-                # mistakes (e.g. women previously tagged male) without manual work.
-                swept += self.reclassify_group(g["id"], retrain=False).get("removed", 0)
-                self._backfill_group(g["id"])
+                # Full resync: retrain, pull in matches, and sweep out low-confidence
+                # auto-tags that no longer clear the (now margin-based) threshold —
+                # cleans up mistakes (e.g. women previously tagged male) hands-free.
+                swept += self.resync_group(g["id"]).get("removed", 0)
             if labeled:
-                print(f"[groups] startup: upgraded {len(labeled)} labeled groups "
-                      f"(reject-sweep untagged {swept} low-confidence auto-tags)")
+                print(f"[groups] startup: resynced {len(labeled)} labeled groups "
+                      f"(untagged {swept} low-confidence auto-tags)")
         except Exception as e:
             print(f"[groups] startup group upgrade failed: {e}")
 
@@ -492,9 +490,8 @@ class GroupService:
         member_ids = self.db.group_members(group_id)
         if member_ids:
             self.set_members_feedback(group_id, member_ids, "confirmed")
-            # Recompute the discriminative centroid from the confirmed members and
-            # backfill, so the newly-named group learns and starts auto-tagging.
-            self.train_and_backfill(group_id)
+            # Naming/seeding a group defines it, so re-derive the whole membership.
+            self.resync_group(group_id)
         else:
             self._refresh_labeled()
 
@@ -531,12 +528,12 @@ class GroupService:
             # 2. Add selected artifacts as confirmed members of the tag group
             self.set_members_feedback(group_id, artifact_ids, "confirmed")
 
-        # 3. Compute each tag group's centroid from its confirmed members and
-        #    backfill existing artifacts. Without this a freshly-created tag
-        #    group keeps a NULL centroid, so labeled_group_centroids() (and thus
-        #    _labeled / _auto_tag) skips it and NEW artifacts are never tagged.
+        # 3. Tagging defines/updates each group, so re-derive its whole membership
+        #    (compute centroid, pull in new matches, drop stale auto-tags). Without
+        #    this a freshly-created tag group keeps a NULL centroid, so
+        #    labeled_group_centroids() (and _auto_tag) skips it and nothing tags.
         for group_id in group_ids:
-            self.train_and_backfill(group_id)
+            self.resync_group(group_id)
 
         # 4. Clean up source group (suggested cluster) if provided
         if source_group_id is not None and group_ids:
@@ -950,6 +947,19 @@ class GroupService:
             print(f"[groups] reject-sweep: untagged {len(to_remove)} no-longer-matching "
                   f"auto-classified members from group {group_id}")
         return {"removed": len(to_remove)}
+
+    def resync_group(self, group_id: int) -> dict:
+        """Any manual confirm/reject CHANGES what the group means, so re-derive the
+        whole membership — 'you had to do that by hand, let's re-check everything
+        else still fits, and pull in anything that should now'. Retrain, backfill
+        every candidate that now matches, and sweep out machine-tagged members that
+        no longer do. Human confirmations, seeds and rejections are respected."""
+        self._recompute_centroid(group_id)
+        added = self._backfill_group(group_id)                       # pull in new matches
+        removed = self.reclassify_group(group_id, retrain=False)["removed"]  # drop stale ones
+        if added or removed:
+            print(f"[groups] resync group {group_id}: +{added} added / -{removed} untagged")
+        return {"added": added, "removed": removed}
 
     def _recompute_centroid(self, group_id: int) -> dict:
         # Get positive vectors
