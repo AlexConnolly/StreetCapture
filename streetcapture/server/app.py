@@ -590,15 +590,15 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         background_tasks.add_task(gs.train_and_backfill, group_id)
         return {"ok": True}
 
-    @app.post("/api/groups/{group_id}/accept-remaining", dependencies=[guard])
-    def group_accept_remaining(group_id: int, background_tasks: BackgroundTasks):
-        """'I've reviewed enough — accept the rest.' Confirms every pending
-        suggestion (auto-classified, so they don't retrain the centroid) and,
-        once the group is trusted, future matches auto-classify too."""
-        gs = app.state.service.groups
-        accepted = gs.db.accept_pending_members(group_id)
-        background_tasks.add_task(gs.train_and_backfill, group_id)
-        return {"ok": True, "accepted": accepted}
+    @app.post("/api/groups/{group_id}/auto-classify-remaining", dependencies=[guard])
+    def group_auto_classify_remaining(group_id: int):
+        """'I've done enough training — let the model decide the rest.' Re-scores
+        the pending suggestions: matches get the tag (auto-classified), the rest
+        are dropped. Nothing here retrains the model."""
+        r = app.state.service.groups.auto_classify_pending(group_id)
+        if "error" in r:
+            raise HTTPException(status_code=400, detail=r["error"])
+        return {"ok": True, **r}
 
     @app.post("/api/groups/{group_id}/backfill", dependencies=[guard])
     def group_backfill(group_id: int, threshold: float | None = Query(None)):

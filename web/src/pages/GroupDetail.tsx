@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   deleteGroup, getGroupMembers, getGroups, nameGroup, setGroupNotify,
   setMemberStatus, setMembersBatchStatus, backfillGroup, withToken,
-  tagArtifacts, getTagsAutocomplete, acceptRemainingSuggestions, type Artifact, type Group,
+  tagArtifacts, getTagsAutocomplete, autoClassifyRemaining, type Artifact, type Group,
 } from "../api";
 import { IconBack, IconBell, IconTrash } from "../lib";
 
@@ -94,20 +94,20 @@ export default function GroupDetail() {
     }
   }
 
-  async function acceptRemaining() {
-    if (!window.confirm("Accept all remaining suggestions as correct, and auto-classify future matches for this group?")) return;
+  async function classifyRemaining() {
+    if (!window.confirm("I've done enough training — let the model classify the rest? Matches get the tag automatically; the others are dropped (no more yes/no). This doesn't retrain the group.")) return;
 
-    // Optimistically mark pending items as confirmed
+    // Optimistically clear the review queue; reload shows what the model kept.
     setMembers((ms) => {
       if (!ms) return ms;
-      return ms.map((m) => (m.member_status === "rejected" ? m : { ...m, member_status: "confirmed" as const }));
+      return ms.filter((m) => m.member_status === "confirmed");
     });
 
     try {
-      await acceptRemainingSuggestions(gid);
+      await autoClassifyRemaining(gid);
       load();
     } catch (e) {
-      console.error("Failed to accept remaining suggestions", e);
+      console.error("Failed to auto-classify remaining suggestions", e);
     }
   }
 
@@ -485,11 +485,11 @@ export default function GroupDetail() {
               {members && members.some((m) => m.member_status !== "confirmed") && (
                 <div className="flex gap-2">
                   <button
-                    onClick={acceptRemaining}
+                    onClick={classifyRemaining}
                     className="rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent hover:bg-accent/20 active:scale-95 transition"
-                    title="Accept remaining suggestions and auto-classify future matches"
+                    title="I've done enough training — let the model classify the rest (matches get tagged, others dropped)"
                   >
-                    ✓ Accept Remaining
+                    ⚡ Auto-classify Rest
                   </button>
                   <button
                     onClick={discardNegatives}

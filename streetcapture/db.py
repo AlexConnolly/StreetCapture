@@ -463,16 +463,34 @@ class Database:
                 "SELECT COUNT(*) FROM group_members WHERE group_id=? AND status='confirmed' "
                 "AND (source IS NULL OR source!='auto_confirm')", (group_id,)).fetchone()[0]
 
-    def accept_pending_members(self, group_id: int) -> int:
-        """Accept every un-reviewed suggestion in a group: mark it confirmed and
-        auto-classified. They show as classified but don't train the centroid
-        (the user bulk-accepted rather than individually vouching for each)."""
+    def pending_member_ids(self, group_id: int) -> list[int]:
+        """Un-reviewed auto-suggestions (status NULL) awaiting a yes/no."""
         with self._lock:
-            cur = self._conn.execute(
+            rows = self._conn.execute(
+                "SELECT artifact_id FROM group_members WHERE group_id=? AND status IS NULL",
+                (group_id,)).fetchall()
+        return [r[0] for r in rows]
+
+    def mark_auto_classified(self, group_id: int, artifact_ids: list[int]) -> None:
+        """Confirm members as machine-classified: they carry the tag but
+        source='auto_confirm' keeps them out of centroid training."""
+        if not artifact_ids:
+            return
+        with self._lock:
+            self._conn.executemany(
                 "UPDATE group_members SET status='confirmed', source='auto_confirm' "
-                "WHERE group_id=? AND status IS NULL", (group_id,))
+                "WHERE group_id=? AND artifact_id=?",
+                [(group_id, aid) for aid in artifact_ids])
             self._conn.commit()
-            return cur.rowcount
+
+    def remove_members(self, group_id: int, artifact_ids: list[int]) -> None:
+        if not artifact_ids:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "DELETE FROM group_members WHERE group_id=? AND artifact_id=?",
+                [(group_id, aid) for aid in artifact_ids])
+            self._conn.commit()
 
     def background_negative_vectors(self, group_id: int, classes: list[str], limit: int = 200) -> list:
         """Fetch other vectors of the same classes that are not in the specified group."""

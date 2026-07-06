@@ -197,3 +197,35 @@ def test_recluster_excludes_labeled_artifacts(service):
     pool = {r[0] for r in db.embeddings_for_clustering()}
     assert ungrouped in pool
     assert not (set(males) & pool), "labeled-confirmed artifacts leaked into clustering"
+
+
+def test_auto_classify_pending(service):
+    """'Auto-classify remaining' lets the model decide the backlog: a match keeps
+    the tag (confirmed, source auto_confirm -> not training); a non-match is
+    dropped and does NOT get the tag. Neither retrains the centroid."""
+    gs, db = service
+    males = [_add_artifact(db, "person", _vec(1.0, 0.0)),
+             _add_artifact(db, "person", _vec(0.98, 0.10)),
+             _add_artifact(db, "person", _vec(0.98, -0.10))]
+    gs.tag_artifacts(males, [{"key": "gender", "value": "male"}])
+    gid = _tag_group_id(db, "gender", "male")[0]
+
+    # Two un-reviewed suggestions: one clearly matches, one clearly doesn't.
+    match = _add_artifact(db, "person", _vec(0.97, 0.05))
+    nonmatch = _add_artifact(db, "person", _vec(0.0, 1.0))
+    db.add_member(gid, match, 0.5, "auto")     # status NULL = pending
+    db.add_member(gid, nonmatch, 0.5, "auto")
+
+    r = gs.auto_classify_pending(gid)
+    assert r["classified"] == 1 and r["dropped"] == 1, r
+
+    # Match: tagged, but as auto_confirm so it doesn't train the model.
+    assert _member(db, gid, match) == ("confirmed", "auto_confirm")
+    # Non-match: dropped entirely, does not carry the tag.
+    assert _member(db, gid, nonmatch) is None
+    assert nonmatch not in db.group_members(gid)
+
+    # Only the human-tagged males train the centroid.
+    human = db.group_member_vectors(gid, status="confirmed", exclude_auto_confirm=True)
+    assert len(human) == len(males)
+    assert db.human_confirmed_count(gid) == len(males)

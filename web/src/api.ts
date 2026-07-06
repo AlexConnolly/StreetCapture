@@ -174,8 +174,9 @@ export const nameGroup = (id: number, name: string) =>
 export const setGroupNotify = (id: number, notify: boolean) =>
   api(`/api/groups/${id}/notify`, { method: "POST", body: JSON.stringify({ notify }) });
 export const deleteGroup = (id: number) => api(`/api/groups/${id}`, { method: "DELETE" });
-export const acceptRemainingSuggestions = (groupId: number) =>
-  api<{ ok: boolean; accepted: number }>(`/api/groups/${groupId}/accept-remaining`, { method: "POST" });
+export const autoClassifyRemaining = (groupId: number) =>
+  api<{ ok: boolean; classified: number; dropped: number }>(
+    `/api/groups/${groupId}/auto-classify-remaining`, { method: "POST" });
 export const getGroupMembers = (id: number, limit = 120, offset = 0) => api<Artifact[]>(`/api/groups/${id}?limit=${limit}&offset=${offset}`);
 export const setMemberStatus = (
   gid: number, aid: number, status: "confirmed" | "rejected" | "removed",

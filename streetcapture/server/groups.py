@@ -882,6 +882,38 @@ class GroupService:
         self._recompute_centroid(group_id)
         self._backfill_group(group_id)
 
+    def auto_classify_pending(self, group_id: int) -> dict:
+        """'I've done enough training — let the model decide the rest.' Re-scores
+        every un-reviewed suggestion against the current centroid: matches (>=
+        threshold) are auto-classified (confirmed, source='auto_confirm'); the
+        rest are dropped and DON'T get the tag. Nothing here trains the model
+        (auto_confirm is excluded), so it just applies the model you already
+        trained. Dropped ones aren't blocked — a later match can re-add them."""
+        self._recompute_centroid(group_id)   # score against the latest model
+        entry = next(((c, mthr) for (g, _n, _no, _ln, c, mthr) in self._labeled
+                      if g == group_id), None)
+        if entry is None:
+            return {"error": "group has no centroid"}
+        cent, mthr = entry
+        cent = _norm(cent)
+        if mthr is not None:
+            thr = mthr
+        else:
+            thr = (self.cfg.label_match_threshold if group_id in self._seeded
+                   else self.cfg.group_match_threshold)
+
+        classified, dropped = [], []
+        for aid in self.db.pending_member_ids(group_id):
+            vec = self.db.embedding_for(aid)
+            s = float(_norm(vec) @ cent) if vec is not None else -1.0
+            (classified if s >= thr else dropped).append(aid)
+
+        # Matches carry the tag (source='auto_confirm' -> not used for training);
+        # non-matches are dropped from the queue (a later match can re-add them).
+        self.db.mark_auto_classified(group_id, classified)
+        self.db.remove_members(group_id, dropped)
+        return {"classified": len(classified), "dropped": len(dropped)}
+
     def _recompute_centroid(self, group_id: int) -> dict:
         # Get positive vectors
         seeds = self.db.seed_vectors(group_id)
